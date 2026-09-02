@@ -6,10 +6,14 @@ plugins {
 kotlin {
     jvmToolchain(17)
 
-    androidLibrary {
+    android {
         namespace = "me.abuzaid.lensift.shared"
         compileSdk = 35
         minSdk = 30
+
+        withHostTest {
+            isIncludeAndroidResources = true
+        }
     }
 
     iosArm64()
@@ -20,12 +24,6 @@ kotlin {
         binaries.framework {
             baseName = "Shared"
             isStatic = true
-        }
-    }
-
-    android {
-        withHostTest {
-            isIncludeAndroidResources = true
         }
     }
 
