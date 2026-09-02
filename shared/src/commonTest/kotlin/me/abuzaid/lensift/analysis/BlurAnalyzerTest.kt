@@ -80,6 +80,26 @@ class BlurAnalyzerTest {
     }
 
     @Test
+    fun smoothFullRangeHorizontalGradientIsInconclusiveDespiteLowBlurSignals() {
+        val policy = balancedPolicy()
+        val evidence = BlurAnalyzer.analyze(horizontalGradientFrame(64, 64), policy)
+
+        assertFinite(evidence)
+        assertAtOrBelowBlurCeilings(evidence, policy)
+        assertEquals(BlurVerdict.Inconclusive, evidence.verdict)
+    }
+
+    @Test
+    fun smoothFullRangeDiagonalGradientIsInconclusiveDespiteLowBlurSignals() {
+        val policy = balancedPolicy()
+        val evidence = BlurAnalyzer.analyze(diagonalGradientFrame(64, 64), policy)
+
+        assertFinite(evidence)
+        assertAtOrBelowBlurCeilings(evidence, policy)
+        assertEquals(BlurVerdict.Inconclusive, evidence.verdict)
+    }
+
+    @Test
     fun framesTooSmallForAThreeByThreeKernelAreInconclusiveWithFiniteScores() {
         listOf(LumaFrame(2, 8, ByteArray(16)), LumaFrame(8, 2, ByteArray(16))).forEach { frame ->
             val evidence = BlurAnalyzer.analyze(frame, balancedPolicy())
@@ -89,7 +109,7 @@ class BlurAnalyzerTest {
         }
     }
 
-    private fun balancedPolicy(blur: BlurPolicy = BlurPolicy(2_000.0, 0.20)): AnalysisPolicy = AnalysisPolicy(
+    private fun balancedPolicy(blur: BlurPolicy = BlurPolicy(0.04, 0.20)): AnalysisPolicy = AnalysisPolicy(
         sensitivity = Sensitivity.Balanced,
         maxPerceptualDistance = 8,
         maxCaptureGapMillis = 90_000,
@@ -104,6 +124,22 @@ class BlurAnalyzerTest {
             val x = index % width
             val y = index / width
             if ((x / 8 + y / 8) % 2 == 0) 0 else 255.toByte()
+        },
+    )
+
+    private fun horizontalGradientFrame(width: Int, height: Int): LumaFrame = LumaFrame(
+        width,
+        height,
+        ByteArray(width * height) { index -> ((index % width) * 255 / (width - 1)).toByte() },
+    )
+
+    private fun diagonalGradientFrame(width: Int, height: Int): LumaFrame = LumaFrame(
+        width,
+        height,
+        ByteArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            ((x + y) * 255 / (width + height - 2)).toByte()
         },
     )
 
@@ -131,5 +167,10 @@ class BlurAnalyzerTest {
     private fun assertFinite(evidence: BlurEvidence) {
         assertTrue(evidence.laplacianVariance.isFinite(), "laplacian variance must be finite")
         assertTrue(evidence.edgeDensity.isFinite(), "edge density must be finite")
+    }
+
+    private fun assertAtOrBelowBlurCeilings(evidence: BlurEvidence, policy: AnalysisPolicy) {
+        assertTrue(evidence.laplacianVariance <= policy.blur.laplacianVarianceCeiling)
+        assertTrue(evidence.edgeDensity <= policy.blur.edgeDensityCeiling)
     }
 }
