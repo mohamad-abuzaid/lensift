@@ -49,15 +49,16 @@ object KeeperRecommender {
         if (keeper.isEdited && alternatives.any { !it.isEdited }) add(KeeperReason.Edited)
         if (alternatives.any { compareSharpness(keeper, it, blurEvidence) > 0 }) add(KeeperReason.Sharper)
         if (alternatives.any { pixelCount(keeper) > pixelCount(it) }) add(KeeperReason.HigherResolution)
-        if (isQualityTie(keeper, alternatives, blurEvidence)) add(KeeperReason.StableTieBreak)
+        if (hasStableTieBreak(keeper, alternatives, blurEvidence)) add(KeeperReason.StableTieBreak)
     }
 
-    private fun isQualityTie(
+    private fun hasStableTieBreak(
         keeper: PhotoDescriptor,
         alternatives: List<PhotoDescriptor>,
         blurEvidence: Map<AssetId, BlurEvidence>,
-    ): Boolean = alternatives.isNotEmpty() && alternatives.all {
-        keeper.isFavorite == it.isFavorite &&
+    ): Boolean = alternatives.any {
+        keeper.id.value < it.id.value &&
+            keeper.isFavorite == it.isFavorite &&
             keeper.isEdited == it.isEdited &&
             compareSharpness(keeper, it, blurEvidence) == 0 &&
             pixelCount(keeper) == pixelCount(it)
@@ -70,13 +71,7 @@ object KeeperRecommender {
     ): Int {
         val leftEvidence = validEvidence(blurEvidence[left.id])
         val rightEvidence = validEvidence(blurEvidence[right.id])
-        if (leftEvidence == null || rightEvidence == null) {
-            return when {
-                leftEvidence != null -> 1
-                rightEvidence != null -> -1
-                else -> 0
-            }
-        }
+        if (leftEvidence == null || rightEvidence == null) return 0
         compareValues(leftEvidence.laplacianVariance, rightEvidence.laplacianVariance)
             .takeIf { it != 0 }
             ?.let { return it }

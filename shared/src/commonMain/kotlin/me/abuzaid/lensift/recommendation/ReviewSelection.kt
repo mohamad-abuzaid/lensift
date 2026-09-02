@@ -15,7 +15,7 @@ object ReviewSelection {
     ): Set<AssetId> {
         require(keeper in finding.assetIds) { "The keeper must belong to the exact duplicate finding" }
         return finding.assetIds.filterTo(linkedSetOf()) { assetId ->
-            assetId != keeper && descriptorsById[assetId]?.isFavorite == false
+            assetId != keeper && descriptorsById[assetId]?.let { it.id == assetId && !it.isFavorite } == true
         }
     }
 

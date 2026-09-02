@@ -39,6 +39,23 @@ class ReviewSelectionTest {
     }
 
     @Test
+    fun exactDuplicatesDoNotTrustMismatchedDescriptorMetadata() {
+        val keeper = photo("keeper")
+        val redundant = AssetId("redundant")
+        val mismatchedDescriptor = photo("different-asset")
+        val finding = ExactDuplicate(listOf(keeper.id, redundant))
+
+        assertEquals(
+            emptySet(),
+            ReviewSelection.initialFor(
+                finding,
+                keeper.id,
+                mapOf(keeper.id to keeper, redundant to mismatchedDescriptor),
+            ),
+        )
+    }
+
+    @Test
     fun nearDuplicatesNeverPreselectRemoval() {
         assertEquals(
             emptySet(),

@@ -54,6 +54,37 @@ class KeeperRecommenderTest {
     }
 
     @Test
+    fun missingBlurEvidenceFallsThroughToPixelCount() {
+        val finiteButSmaller = photo("a-finite")
+        val missingButLarger = photo("z-missing", width = 4_000, height = 3_000)
+
+        assertEquals(
+            KeeperRecommendation(missingButLarger.id, listOf(KeeperReason.HigherResolution)),
+            KeeperRecommender.recommend(
+                listOf(finiteButSmaller, missingButLarger),
+                mapOf(finiteButSmaller.id to evidence(20.0, 0.8)),
+            ),
+        )
+    }
+
+    @Test
+    fun nonFiniteBlurEvidenceFallsThroughToStableIdentifier() {
+        val nonFiniteEarlier = photo("a-non-finite")
+        val finiteLater = photo("z-finite")
+
+        assertEquals(
+            KeeperRecommendation(nonFiniteEarlier.id, listOf(KeeperReason.StableTieBreak)),
+            KeeperRecommender.recommend(
+                listOf(nonFiniteEarlier, finiteLater),
+                mapOf(
+                    nonFiniteEarlier.id to evidence(Double.NaN, 0.8),
+                    finiteLater.id to evidence(20.0, 0.8),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun greaterPixelCountOutranksStableIdentifier() {
         val larger = photo("z-larger", width = 4_000, height = 3_000)
         val smaller = photo("a-smaller")
@@ -72,6 +103,21 @@ class KeeperRecommenderTest {
         assertEquals(
             KeeperRecommendation(earlier.id, listOf(KeeperReason.StableTieBreak)),
             KeeperRecommender.recommend(listOf(later, earlier)),
+        )
+    }
+
+    @Test
+    fun stableTieBreakExplainsTheTiedRivalEvenWhenAnotherCandidateDiffers() {
+        val earlierFavorite = photo("a-earlier", favorite = true)
+        val laterFavorite = photo("b-later", favorite = true)
+        val nonFavorite = photo("c-non-favorite")
+
+        assertEquals(
+            KeeperRecommendation(
+                earlierFavorite.id,
+                listOf(KeeperReason.Favorite, KeeperReason.StableTieBreak),
+            ),
+            KeeperRecommender.recommend(listOf(laterFavorite, nonFavorite, earlierFavorite)),
         )
     }
 
