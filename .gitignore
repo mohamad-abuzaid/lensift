@@ -1,3 +1,5 @@
 .worktrees/
 .idea/
 .DS_Store
+.gradle/
+build/
