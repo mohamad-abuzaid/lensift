@@ -14,10 +14,7 @@ object PerceptualHash {
 
     fun compute(frame: LumaFrame): Long {
         val normalized = resizeByAreaAverage(frame)
-        val average = normalized.average()
-        normalized.indices.forEach { index -> normalized[index] -= average }
         val coefficients = dctLowFrequencyCoefficients(normalized)
-        coefficients[0] = 0.0
         coefficients.indices.forEach { index ->
             if (abs(coefficients[index]) < COEFFICIENT_ZERO_EPSILON) coefficients[index] = 0.0
         }

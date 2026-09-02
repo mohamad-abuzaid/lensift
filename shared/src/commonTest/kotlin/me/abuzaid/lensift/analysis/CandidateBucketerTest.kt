@@ -34,19 +34,16 @@ class CandidateBucketerTest {
 
     @Test
     fun returnsLexicographicallyCanonicalPairsInStableOrder() {
-        val pairs = CandidateBucketer.find(
-            listOf(candidate("z"), candidate("a"), candidate("m")),
-            policy(),
+        val expected = listOf(
+            CandidatePair(AssetId("a"), AssetId("m")),
+            CandidatePair(AssetId("a"), AssetId("z")),
+            CandidatePair(AssetId("m"), AssetId("z")),
         )
+        val candidates = listOf(candidate("z"), candidate("a"), candidate("m"))
 
-        assertEquals(
-            listOf(
-                CandidatePair(AssetId("a"), AssetId("m")),
-                CandidatePair(AssetId("a"), AssetId("z")),
-                CandidatePair(AssetId("m"), AssetId("z")),
-            ),
-            pairs,
-        )
+        assertEquals(expected, CandidateBucketer.find(candidates, policy()))
+        assertEquals(expected, CandidateBucketer.find(listOf(candidates[1], candidates[2], candidates[0]), policy()))
+        assertEquals(expected, CandidateBucketer.find(listOf(candidates[2], candidates[0], candidates[1]), policy()))
     }
 
     @Test
@@ -54,8 +51,8 @@ class CandidateBucketerTest {
         val baseHash = 0x1357_9bdf_2468_ace0L
 
         for (threshold in 0..63) {
-            for (changedBitCount in 0..minOf(threshold, 8)) {
-                val changedHash = baseHash xor changedBits(changedBitCount, threshold)
+            for (changedBitCount in linkedSetOf(0, minOf(8, threshold), threshold)) {
+                val changedHash = baseHash xor changesAcrossBandPrefixes(threshold, changedBitCount)
                 val firstBands = CandidateBucketer.bandsFor(baseHash, threshold).toSet()
                 val secondBands = CandidateBucketer.bandsFor(changedHash, threshold).toSet()
                 val expected = CandidatePair(AssetId("a"), AssetId("b"))
@@ -64,10 +61,26 @@ class CandidateBucketerTest {
                     policy(maxPerceptualDistance = threshold),
                 )
 
-                assertTrue(firstBands.intersect(secondBands).isNotEmpty(), "threshold=$threshold changedBits=$changedBitCount")
-                assertTrue(expected in pairs, "threshold=$threshold changedBits=$changedBitCount")
+                assertEquals(changedBitCount, PerceptualHash.distance(baseHash, changedHash), "threshold=$threshold")
+                assertTrue(firstBands.intersect(secondBands).isNotEmpty(), "threshold=$threshold")
+                assertTrue(expected in pairs, "threshold=$threshold")
             }
         }
+    }
+
+    @Test
+    fun verifiesAnOverlappingBandHitOnlyOnce() {
+        var distanceCalls = 0
+        val pairs = CandidateBucketer.find(
+            listOf(candidate("a"), candidate("b")),
+            policy(maxPerceptualDistance = 8),
+        ) { left, right ->
+            distanceCalls += 1
+            PerceptualHash.distance(left, right)
+        }
+
+        assertEquals(listOf(CandidatePair(AssetId("a"), AssetId("b"))), pairs)
+        assertEquals(1, distanceCalls)
     }
 
     @Test
@@ -81,11 +94,10 @@ class CandidateBucketerTest {
         assertEquals(emptyList(), CandidateBucketer.bandsFor(0L, 64))
     }
 
-    private fun changedBits(count: Int, threshold: Int): Long {
-        var bits = 0L
-        repeat(count) { index -> bits = bits or (1L shl ((index * 17 + threshold * 7 + 31) % 64)) }
-        return bits
-    }
+    private fun changesAcrossBandPrefixes(threshold: Int, changedBitCount: Int): Long =
+        CandidateBucketer.bandsFor(0L, threshold).take(changedBitCount).fold(0L) { changes, band ->
+            changes or (1L shl band.startBit)
+        }
 
     private fun candidate(
         id: String,

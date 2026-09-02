@@ -48,6 +48,13 @@ class PerceptualHashTest {
         assertEquals(0, PerceptualHash.distance(PerceptualHash.compute(singlePixel), PerceptualHash.compute(singlePixel)))
     }
 
+    @Test
+    fun packsTheUnmodifiedDctDcComparison() {
+        val uniformFrame = LumaFrame(1, 1, byteArrayOf(127))
+
+        assertTrue(PerceptualHash.compute(uniformFrame) < 0L)
+    }
+
     private fun gradientFrame(width: Int, height: Int, maximumSample: Int = 255): LumaFrame = LumaFrame(
         width,
         height,

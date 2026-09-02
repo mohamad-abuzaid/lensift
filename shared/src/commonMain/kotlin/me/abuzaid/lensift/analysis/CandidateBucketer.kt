@@ -39,7 +39,14 @@ internal data class HashBand(
  * cannot change the decision.
  */
 object CandidateBucketer {
-    fun find(inputs: Iterable<PerceptualCandidate>, policy: AnalysisPolicy): List<CandidatePair> {
+    fun find(inputs: Iterable<PerceptualCandidate>, policy: AnalysisPolicy): List<CandidatePair> =
+        find(inputs, policy, PerceptualHash::distance)
+
+    internal fun find(
+        inputs: Iterable<PerceptualCandidate>,
+        policy: AnalysisPolicy,
+        distance: (Long, Long) -> Int,
+    ): List<CandidatePair> {
         val candidates = inputs.sortedBy { it.assetId.value }
         require(candidates.map { it.assetId }.toSet().size == candidates.size) { "Candidate asset IDs must be unique" }
 
@@ -70,7 +77,7 @@ object CandidateBucketer {
             bands.values.forEach { bandMembers ->
                 for (leftIndex in 0 until bandMembers.lastIndex) {
                     for (rightIndex in leftIndex + 1 until bandMembers.size) {
-                        addIfVerified(hits, bandMembers[leftIndex], bandMembers[rightIndex], policy)
+                        addBandHit(hits, bandMembers[leftIndex], bandMembers[rightIndex])
                     }
                 }
             }
@@ -79,12 +86,20 @@ object CandidateBucketer {
         candidates.filter { it.capturedAtEpochMillis == null }.forEach { unknownTime ->
             candidates.forEach { other ->
                 if (unknownTime != other && sharesBand(unknownTime.hash, other.hash, policy.maxPerceptualDistance)) {
-                    addIfVerified(hits, unknownTime, other, policy)
+                    addBandHit(hits, unknownTime, other)
                 }
             }
         }
 
-        return hits.sortedWith(compareBy<CandidatePair> { it.first.value }.thenBy { it.second.value })
+        val candidatesById = candidates.associateBy { it.assetId }
+        return hits.asSequence()
+            .sortedWith(compareBy<CandidatePair> { it.first.value }.thenBy { it.second.value })
+            .filter { pair ->
+                val left = candidatesById.getValue(pair.first)
+                val right = candidatesById.getValue(pair.second)
+                metadataCompatible(left, right, policy) && distance(left.hash, right.hash) <= policy.maxPerceptualDistance
+            }
+            .toList()
     }
 
     internal fun bandsFor(hash: Long, maxPerceptualDistance: Int): List<HashBand> {
@@ -120,15 +135,12 @@ object CandidateBucketer {
         return pairs
     }
 
-    private fun addIfVerified(
+    private fun addBandHit(
         hits: MutableSet<CandidatePair>,
         left: PerceptualCandidate,
         right: PerceptualCandidate,
-        policy: AnalysisPolicy,
     ) {
-        if (metadataCompatible(left, right, policy) && PerceptualHash.distance(left.hash, right.hash) <= policy.maxPerceptualDistance) {
-            hits += canonicalPair(left, right)
-        }
+        hits += canonicalPair(left, right)
     }
 
     private fun metadataCompatible(
