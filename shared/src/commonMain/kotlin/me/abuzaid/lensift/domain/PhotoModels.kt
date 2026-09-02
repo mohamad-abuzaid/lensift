@@ -44,29 +44,49 @@ enum class EvidenceReason {
     LowSharpnessSignals,
 }
 
-data class ExactDuplicate(
-    val assetIds: List<AssetId>,
-    val reason: EvidenceReason = EvidenceReason.IdenticalContent,
-) {
+class ExactDuplicate(assetIds: List<AssetId>) {
+    val assetIds: List<AssetId> = ownedAssetIds(assetIds)
+    val reason: EvidenceReason get() = EvidenceReason.IdenticalContent
+
     init {
-        require(assetIds.size >= 2 && assetIds.toSet().size == assetIds.size) {
+        require(this.assetIds.size >= 2 && this.assetIds.toSet().size == this.assetIds.size) {
             "Exact duplicate evidence requires at least two distinct assets"
         }
     }
+
+    override fun equals(other: Any?): Boolean = other is ExactDuplicate && assetIds == other.assetIds
+
+    override fun hashCode(): Int = assetIds.hashCode()
+
+    override fun toString(): String = "ExactDuplicate(assetIds=$assetIds, reason=$reason)"
 }
 
-data class NearDuplicate(
-    val assetIds: List<AssetId>,
-    val reason: EvidenceReason = EvidenceReason.VisuallySimilar,
-) {
+class NearDuplicate(assetIds: List<AssetId>) {
+    val assetIds: List<AssetId> = ownedAssetIds(assetIds)
+    val reason: EvidenceReason get() = EvidenceReason.VisuallySimilar
+
     init {
-        require(assetIds.size >= 2 && assetIds.toSet().size == assetIds.size) {
+        require(this.assetIds.size >= 2 && this.assetIds.toSet().size == this.assetIds.size) {
             "Near duplicate evidence requires at least two distinct assets"
         }
     }
+
+    override fun equals(other: Any?): Boolean = other is NearDuplicate && assetIds == other.assetIds
+
+    override fun hashCode(): Int = assetIds.hashCode()
+
+    override fun toString(): String = "NearDuplicate(assetIds=$assetIds, reason=$reason)"
 }
 
-data class BlurCandidate(
-    val assetId: AssetId,
-    val reason: EvidenceReason = EvidenceReason.LowSharpnessSignals,
-)
+data class BlurCandidate(val assetId: AssetId) {
+    val reason: EvidenceReason get() = EvidenceReason.LowSharpnessSignals
+}
+
+private fun ownedAssetIds(assetIds: List<AssetId>): List<AssetId> = AssetIdList(assetIds.toTypedArray())
+
+/** A List implementation that never exposes the caller-owned mutable source. */
+private class AssetIdList(private val values: Array<AssetId>) : AbstractList<AssetId>() {
+    override val size: Int get() = values.size
+
+    override fun get(index: Int): AssetId = values[index]
+}

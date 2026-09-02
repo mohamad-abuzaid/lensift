@@ -4,17 +4,32 @@ import me.abuzaid.lensift.domain.AnalysisPolicy
 import me.abuzaid.lensift.domain.AssetId
 
 /** A deterministic near-duplicate cluster, including singleton assets with no matching neighbor. */
-data class NearDuplicateCluster(
+class NearDuplicateCluster(
     val id: AssetId,
-    val assetIds: List<AssetId>,
+    assetIds: List<AssetId>,
 ) {
+    val assetIds: List<AssetId> = ClusterAssetIdList(assetIds.toTypedArray())
+
     init {
-        require(assetIds.isNotEmpty()) { "Near-duplicate clusters must contain at least one asset" }
-        require(assetIds == assetIds.sortedBy(AssetId::value)) { "Near-duplicate cluster members must be ordered by ID" }
-        require(assetIds.toSet().size == assetIds.size) { "Near-duplicate cluster members must be distinct" }
-        require(id == assetIds.first()) { "Near-duplicate cluster ID must be its smallest member ID" }
+        require(this.assetIds.isNotEmpty()) { "Near-duplicate clusters must contain at least one asset" }
+        require(this.assetIds == this.assetIds.sortedBy(AssetId::value)) { "Near-duplicate cluster members must be ordered by ID" }
+        require(this.assetIds.toSet().size == this.assetIds.size) { "Near-duplicate cluster members must be distinct" }
+        require(id == this.assetIds.first()) { "Near-duplicate cluster ID must be its smallest member ID" }
     }
+
+    override fun equals(other: Any?): Boolean =
+        other is NearDuplicateCluster && id == other.id && assetIds == other.assetIds
+
+    override fun hashCode(): Int = 31 * id.hashCode() + assetIds.hashCode()
+
+    override fun toString(): String = "NearDuplicateCluster(id=$id, assetIds=$assetIds)"
 }
+
+/** Complete-linkage clusters plus the source candidate-generation coverage status. */
+data class NearDuplicateClusteringResult(
+    val clusters: List<NearDuplicateCluster>,
+    val candidateGenerationStatus: CandidateGenerationStatus,
+)
 
 /**
  * Forms complete-linkage clusters from policy-qualified perceptual candidates.
@@ -24,13 +39,14 @@ data class NearDuplicateCluster(
  * Among allowed merges, the smallest maximum Hamming distance wins; asset IDs resolve every tie.
  */
 object NearDuplicateClusterer {
-    fun cluster(inputs: Iterable<PerceptualCandidate>, policy: AnalysisPolicy): List<NearDuplicateCluster> {
+    fun cluster(inputs: Iterable<PerceptualCandidate>, policy: AnalysisPolicy): NearDuplicateClusteringResult {
         val candidates = inputs.sortedBy { it.assetId.value }
         require(candidates.map(PerceptualCandidate::assetId).toSet().size == candidates.size) {
             "Near-duplicate candidate asset IDs must be unique"
         }
 
-        val qualifiedPairs = CandidateBucketer.find(candidates, policy).toSet()
+        val candidateResult = CandidateBucketer.find(candidates, policy)
+        val qualifiedPairs = candidateResult.pairs.toSet()
         var clusters = candidates.map { Cluster(listOf(it)) }
 
         while (true) {
@@ -42,14 +58,17 @@ object NearDuplicateClusterer {
                 Cluster(mergedMembers)
         }
 
-        return clusters
+        return NearDuplicateClusteringResult(
+            clusters = clusters
             .map { current ->
                 NearDuplicateCluster(
                     id = current.members.first().assetId,
                     assetIds = current.members.map(PerceptualCandidate::assetId),
                 )
             }
-            .sortedBy { it.id.value }
+            .sortedBy { it.id.value },
+            candidateGenerationStatus = candidateResult.status,
+        )
     }
 
     private fun nextMerge(clusters: List<Cluster>, qualifiedPairs: Set<CandidatePair>): ClusterMerge? {
@@ -104,4 +123,10 @@ object NearDuplicateClusterer {
         val firstClusterId: AssetId,
         val secondClusterId: AssetId,
     )
+}
+
+private class ClusterAssetIdList(private val values: Array<AssetId>) : AbstractList<AssetId>() {
+    override val size: Int get() = values.size
+
+    override fun get(index: Int): AssetId = values[index]
 }

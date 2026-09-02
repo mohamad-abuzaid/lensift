@@ -11,13 +11,27 @@ import kotlin.test.assertTrue
 
 class CandidateBucketerTest {
     @Test
+    fun boundsDenseCollisionGenerationAndReportsIncompleteCoverage() {
+        val inputs = (0 until 10_000).map { index ->
+            candidate(index.toString().padStart(5, '0'), hash = 0L)
+        }
+
+        val result = CandidateBucketer.find(inputs, policy())
+
+        assertEquals(CandidateGenerationStatus.PairLimitReached, result.status)
+        assertEquals(CandidateBucketer.MAX_DISTINCT_PAIR_ATTEMPTS, result.attemptedPairCount)
+        assertEquals(CandidateBucketer.MAX_DISTINCT_PAIR_ATTEMPTS, result.pairs.size)
+        assertTrue(result.pairs.all { it.first.value < it.second.value })
+    }
+
+    @Test
     fun rejectsPairsOutsideCaptureTimeWindowButKeepsUnknownCaptureTimes() {
         val policy = policy(maxCaptureGapMillis = 1_000)
         val first = candidate("a", capturedAtEpochMillis = 0)
         val tooLate = candidate("b", capturedAtEpochMillis = 1_001)
         val unknownTime = candidate("c", capturedAtEpochMillis = null)
 
-        val pairs = CandidateBucketer.find(listOf(tooLate, unknownTime, first), policy)
+        val pairs = CandidateBucketer.find(listOf(tooLate, unknownTime, first), policy).pairs
 
         assertFalse(CandidatePair(AssetId("a"), AssetId("b")) in pairs)
         assertTrue(CandidatePair(AssetId("a"), AssetId("c")) in pairs)
@@ -29,7 +43,7 @@ class CandidateBucketerTest {
         val square = candidate("square", width = 100, height = 100)
         val wide = candidate("wide", width = 200, height = 100)
 
-        assertEquals(emptyList(), CandidateBucketer.find(listOf(wide, square), policy(maxAspectRatioDelta = 0.1)))
+        assertEquals(emptyList(), CandidateBucketer.find(listOf(wide, square), policy(maxAspectRatioDelta = 0.1)).pairs)
     }
 
     @Test
@@ -41,9 +55,9 @@ class CandidateBucketerTest {
         )
         val candidates = listOf(candidate("z"), candidate("a"), candidate("m"))
 
-        assertEquals(expected, CandidateBucketer.find(candidates, policy()))
-        assertEquals(expected, CandidateBucketer.find(listOf(candidates[1], candidates[2], candidates[0]), policy()))
-        assertEquals(expected, CandidateBucketer.find(listOf(candidates[2], candidates[0], candidates[1]), policy()))
+        assertEquals(expected, CandidateBucketer.find(candidates, policy()).pairs)
+        assertEquals(expected, CandidateBucketer.find(listOf(candidates[1], candidates[2], candidates[0]), policy()).pairs)
+        assertEquals(expected, CandidateBucketer.find(listOf(candidates[2], candidates[0], candidates[1]), policy()).pairs)
     }
 
     @Test
@@ -59,7 +73,7 @@ class CandidateBucketerTest {
                 val pairs = CandidateBucketer.find(
                     listOf(candidate("b", hash = changedHash), candidate("a", hash = baseHash)),
                     policy(maxPerceptualDistance = threshold),
-                )
+                ).pairs
 
                 assertEquals(changedBitCount, PerceptualHash.distance(baseHash, changedHash), "threshold=$threshold")
                 assertTrue(firstBands.intersect(secondBands).isNotEmpty(), "threshold=$threshold")
@@ -77,7 +91,7 @@ class CandidateBucketerTest {
         ) { left, right ->
             distanceCalls += 1
             PerceptualHash.distance(left, right)
-        }
+        }.pairs
 
         assertEquals(listOf(CandidatePair(AssetId("a"), AssetId("b"))), pairs)
         assertEquals(1, distanceCalls)
@@ -88,7 +102,7 @@ class CandidateBucketerTest {
         val pairs = CandidateBucketer.find(
             listOf(candidate("inverse", hash = -1L), candidate("zero", hash = 0L)),
             policy(maxPerceptualDistance = 64),
-        )
+        ).pairs
 
         assertEquals(listOf(CandidatePair(AssetId("inverse"), AssetId("zero"))), pairs)
         assertEquals(emptyList(), CandidateBucketer.bandsFor(0L, 64))

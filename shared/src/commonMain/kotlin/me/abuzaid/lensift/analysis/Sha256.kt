@@ -4,6 +4,7 @@ package me.abuzaid.lensift.analysis
 class Sha256 {
     private val hash = INITIAL_HASH.copyOf()
     private val block = ByteArray(BLOCK_SIZE)
+    private val schedule = IntArray(64)
     private var bufferedBytes = 0
     private var messageLengthBytes = 0L
     private var finalizedDigest: ByteArray? = null
@@ -68,7 +69,6 @@ class Sha256 {
     }
 
     private fun processBlock(input: ByteArray, offset: Int) {
-        val schedule = IntArray(64)
         for (index in 0 until 16) {
             schedule[index] = readIntBigEndian(input, offset + index * Int.SIZE_BYTES)
         }

@@ -9,22 +9,34 @@ import kotlin.test.assertEquals
 
 class NearDuplicateClustererTest {
     @Test
+    fun clusterOwnsItsMembershipAfterConstruction() {
+        val source = mutableListOf(AssetId("a"), AssetId("b"))
+        val cluster = NearDuplicateCluster(AssetId("a"), source)
+
+        source += AssetId("mutated")
+
+        assertEquals(listOf(AssetId("a"), AssetId("b")), cluster.assetIds)
+    }
+
+    @Test
     fun completeLinkageKeepsChainedEndpointsInSeparateClusters() {
         val inputs = listOf(candidate("a", 0b000L), candidate("b", 0b001L), candidate("c", 0b011L))
+        val result = NearDuplicateClusterer.cluster(inputs, policy())
 
         assertEquals(
             listOf(cluster("a", "a", "b"), cluster("c", "c")),
-            NearDuplicateClusterer.cluster(inputs, policy()),
+            result.clusters,
         )
+        assertEquals(CandidateGenerationStatus.Complete, result.candidateGenerationStatus)
     }
 
     @Test
     fun shufflingAChainKeepsItsClusterIdsAndMemberOrderStable() {
         val inputs = listOf(candidate("a", 0b000L), candidate("b", 0b001L), candidate("c", 0b011L))
-        val expected = NearDuplicateClusterer.cluster(inputs, policy())
+        val expected = NearDuplicateClusterer.cluster(inputs, policy()).clusters
 
-        assertEquals(expected, NearDuplicateClusterer.cluster(listOf(inputs[2], inputs[0], inputs[1]), policy()))
-        assertEquals(expected, NearDuplicateClusterer.cluster(listOf(inputs[1], inputs[2], inputs[0]), policy()))
+        assertEquals(expected, NearDuplicateClusterer.cluster(listOf(inputs[2], inputs[0], inputs[1]), policy()).clusters)
+        assertEquals(expected, NearDuplicateClusterer.cluster(listOf(inputs[1], inputs[2], inputs[0]), policy()).clusters)
     }
 
     @Test
@@ -33,7 +45,7 @@ class NearDuplicateClustererTest {
 
         assertEquals(
             listOf(cluster("isolated", "isolated"), cluster("match-a", "match-a", "match-b")),
-            NearDuplicateClusterer.cluster(inputs, policy()),
+            NearDuplicateClusterer.cluster(inputs, policy()).clusters,
         )
     }
 
@@ -43,7 +55,7 @@ class NearDuplicateClustererTest {
 
         assertEquals(
             listOf(cluster("a", "a", "b"), cluster("c", "c")),
-            NearDuplicateClusterer.cluster(inputs, policy()),
+            NearDuplicateClusterer.cluster(inputs, policy()).clusters,
         )
     }
 
@@ -56,7 +68,7 @@ class NearDuplicateClustererTest {
 
         assertEquals(
             listOf(cluster("early", "early"), cluster("late", "late")),
-            NearDuplicateClusterer.cluster(inputs, policy(maxCaptureGapMillis = 1_000L)),
+            NearDuplicateClusterer.cluster(inputs, policy(maxCaptureGapMillis = 1_000L)).clusters,
         )
     }
 

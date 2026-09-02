@@ -66,9 +66,9 @@ object PerceptualHash {
                 val horizontalScale = if (horizontalFrequency == 0) 1.0 / sqrt(NORMALIZED_SIZE.toDouble()) else sqrt(2.0 / NORMALIZED_SIZE)
                 var sum = 0.0
                 for (y in 0 until NORMALIZED_SIZE) {
-                    val verticalBasis = cos((2 * y + 1) * verticalFrequency * PI / (2 * NORMALIZED_SIZE))
+                    val verticalBasis = DCT_BASIS[verticalFrequency][y]
                     for (x in 0 until NORMALIZED_SIZE) {
-                        val horizontalBasis = cos((2 * x + 1) * horizontalFrequency * PI / (2 * NORMALIZED_SIZE))
+                        val horizontalBasis = DCT_BASIS[horizontalFrequency][x]
                         sum += samples[y * NORMALIZED_SIZE + x] * verticalBasis * horizontalBasis
                     }
                 }
@@ -76,5 +76,11 @@ object PerceptualHash {
             }
         }
         return coefficients
+    }
+
+    private val DCT_BASIS: Array<DoubleArray> = Array(HASH_SIZE) { frequency ->
+        DoubleArray(NORMALIZED_SIZE) { coordinate ->
+            cos((2 * coordinate + 1) * frequency * PI / (2 * NORMALIZED_SIZE))
+        }
     }
 }

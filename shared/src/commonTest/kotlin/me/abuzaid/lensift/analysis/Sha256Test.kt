@@ -4,6 +4,8 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import kotlin.time.TimeSource
 
 class Sha256Test {
     @Test
@@ -27,6 +29,23 @@ class Sha256Test {
         repeat(1_000) { hasher.update(ByteArray(1_000) { 'a'.code.toByte() }) }
 
         assertEquals("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", hasher.digestHex())
+    }
+
+    @Test
+    fun streamsFourMebibytesInIrregularChunksWithinAGenerousBudget() {
+        val input = ByteArray(4 * 1024 * 1024) { 'a'.code.toByte() }
+        val hasher = Sha256()
+        val started = TimeSource.Monotonic.markNow()
+        var offset = 0
+
+        while (offset < input.size) {
+            val end = minOf(offset + 8_191, input.size)
+            hasher.update(input.copyOfRange(offset, end))
+            offset = end
+        }
+
+        assertEquals("299285fc41a44cdb038b9fdaf494c76ca9d0c866672b2b266c1a0c17dda60a05", hasher.digestHex())
+        assertTrue(started.elapsedNow().inWholeSeconds < 15, "streaming SHA-256 exceeded the generous 15-second budget")
     }
 
     @Test

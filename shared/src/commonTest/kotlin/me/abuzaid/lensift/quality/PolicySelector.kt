@@ -179,7 +179,7 @@ private class PreparedCorpus(private val corpus: DevelopmentCorpus) {
         metrics(nearPredictions(policy), corpus.nearLabels)
     }
 
-    fun nearPredictions(policy: AnalysisPolicy): Set<CandidatePair> = CandidateBucketer.find(candidates, policy)
+    fun nearPredictions(policy: AnalysisPolicy): Set<CandidatePair> = CandidateBucketer.find(candidates, policy).pairs
         .filter { pair -> contentSignatures.getValue(pair.first) != contentSignatures.getValue(pair.second) }
         .toSet()
 

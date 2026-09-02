@@ -2,7 +2,6 @@ package me.abuzaid.lensift.analysis
 
 import me.abuzaid.lensift.domain.AnalysisPolicy
 import me.abuzaid.lensift.domain.AssetId
-import kotlin.math.floor
 
 /** The value-only input used to generate near-duplicate candidates. */
 data class PerceptualCandidate(
@@ -27,6 +26,27 @@ data class CandidatePair(
     }
 }
 
+/** Whether all candidate collisions were examined within the configured safety budget. */
+enum class CandidateGenerationStatus {
+    Complete,
+    PairLimitReached,
+}
+
+/**
+ * Candidate pairs plus explicit coverage diagnostics.
+ *
+ * [PairLimitReached] never adds an unverified pair; it means some possible band collisions were
+ * deliberately left unexamined after [attemptedPairCount] distinct pair attempts.
+ */
+class CandidateGenerationResult(
+    pairs: List<CandidatePair>,
+    val status: CandidateGenerationStatus,
+    val attemptedPairCount: Int,
+) {
+    val pairs: List<CandidatePair> = pairs.toList()
+    val isComplete: Boolean get() = status == CandidateGenerationStatus.Complete
+}
+
 internal data class HashBand(
     val startBit: Int,
     val bitCount: Int,
@@ -39,14 +59,17 @@ internal data class HashBand(
  * cannot change the decision.
  */
 object CandidateBucketer {
-    fun find(inputs: Iterable<PerceptualCandidate>, policy: AnalysisPolicy): List<CandidatePair> =
+    /** Bounds CPU and memory for a single pathological collision set while making reduced recall visible. */
+    const val MAX_DISTINCT_PAIR_ATTEMPTS = 100_000
+
+    fun find(inputs: Iterable<PerceptualCandidate>, policy: AnalysisPolicy): CandidateGenerationResult =
         find(inputs, policy, PerceptualHash::distance)
 
     internal fun find(
         inputs: Iterable<PerceptualCandidate>,
         policy: AnalysisPolicy,
         distance: (Long, Long) -> Int,
-    ): List<CandidatePair> {
+    ): CandidateGenerationResult {
         val candidates = inputs.sortedBy { it.assetId.value }
         require(candidates.map { it.assetId }.toSet().size == candidates.size) { "Candidate asset IDs must be unique" }
 
@@ -54,52 +77,60 @@ object CandidateBucketer {
             return allMetadataCompatiblePairs(candidates, policy)
         }
 
-        val hits = linkedSetOf<CandidatePair>()
-        val datedCandidates = candidates.filter { it.capturedAtEpochMillis != null }
-        val partitions = mutableMapOf<MetadataPartition, MutableList<PerceptualCandidate>>()
-        datedCandidates.forEach { candidate ->
-            val aspectCells = neighboringCells(aspectCell(candidate, policy))
-            val timeCells = neighboringCells(timeCell(candidate.capturedAtEpochMillis!!, policy))
-            aspectCells.forEach { aspect ->
-                timeCells.forEach { time ->
-                    partitions.getOrPut(MetadataPartition(aspect, time)) { mutableListOf() }.add(candidate)
-                }
+        val bandGroups = mutableMapOf<HashBand, MutableList<Int>>()
+        candidates.forEachIndexed { index, candidate ->
+            bandsFor(candidate.hash, policy.maxPerceptualDistance).forEach { band ->
+                bandGroups.getOrPut(band) { mutableListOf() }.add(index)
             }
         }
 
-        partitions.values.forEach { partition ->
-            val bands = mutableMapOf<HashBand, MutableList<PerceptualCandidate>>()
-            partition.forEach { candidate ->
-                bandsFor(candidate.hash, policy.maxPerceptualDistance).forEach { band ->
-                    bands.getOrPut(band) { mutableListOf() }.add(candidate)
-                }
-            }
-            bands.values.forEach { bandMembers ->
-                for (leftIndex in 0 until bandMembers.lastIndex) {
-                    for (rightIndex in leftIndex + 1 until bandMembers.size) {
-                        addBandHit(hits, bandMembers[leftIndex], bandMembers[rightIndex])
+        return collectPairs(candidates, policy, distance) generator@{ attempt ->
+            bandGroups.entries
+                .sortedWith(compareBy<Map.Entry<HashBand, MutableList<Int>>> { it.key.startBit }
+                    .thenBy { it.key.bitCount }
+                    .thenBy { it.key.value })
+                .forEach { (_, members) ->
+                    for (leftIndex in 0 until members.lastIndex) {
+                        for (rightIndex in leftIndex + 1 until members.size) {
+                            if (!attempt(members[leftIndex], members[rightIndex])) return@generator false
+                        }
                     }
                 }
+            true
+        }
+    }
+
+    private fun collectPairs(
+        candidates: List<PerceptualCandidate>,
+        policy: AnalysisPolicy,
+        distance: (Long, Long) -> Int,
+        generate: ((Int, Int) -> Boolean) -> Boolean,
+    ): CandidateGenerationResult {
+        val attempted = mutableSetOf<Long>()
+        val qualified = mutableListOf<CandidatePair>()
+        val exhausted = generate attempt@{ firstIndex, secondIndex ->
+            val leftIndex = minOf(firstIndex, secondIndex)
+            val rightIndex = maxOf(firstIndex, secondIndex)
+            val key = (leftIndex.toLong() shl Int.SIZE_BITS) or rightIndex.toLong()
+            if (!attempted.add(key)) return@attempt true
+            if (attempted.size > MAX_DISTINCT_PAIR_ATTEMPTS) {
+                attempted.remove(key)
+                return@attempt false
             }
+
+            val left = candidates[leftIndex]
+            val right = candidates[rightIndex]
+            if (metadataCompatible(left, right, policy) && distance(left.hash, right.hash) <= policy.maxPerceptualDistance) {
+                qualified += canonicalPair(left, right)
+            }
+            true
         }
 
-        candidates.filter { it.capturedAtEpochMillis == null }.forEach { unknownTime ->
-            candidates.forEach { other ->
-                if (unknownTime != other && sharesBand(unknownTime.hash, other.hash, policy.maxPerceptualDistance)) {
-                    addBandHit(hits, unknownTime, other)
-                }
-            }
-        }
-
-        val candidatesById = candidates.associateBy { it.assetId }
-        return hits.asSequence()
-            .sortedWith(compareBy<CandidatePair> { it.first.value }.thenBy { it.second.value })
-            .filter { pair ->
-                val left = candidatesById.getValue(pair.first)
-                val right = candidatesById.getValue(pair.second)
-                metadataCompatible(left, right, policy) && distance(left.hash, right.hash) <= policy.maxPerceptualDistance
-            }
-            .toList()
+        return CandidateGenerationResult(
+            pairs = qualified.sortedWith(compareBy<CandidatePair> { it.first.value }.thenBy { it.second.value }),
+            status = if (exhausted) CandidateGenerationStatus.Complete else CandidateGenerationStatus.PairLimitReached,
+            attemptedPairCount = attempted.size,
+        )
     }
 
     internal fun bandsFor(hash: Long, maxPerceptualDistance: Int): List<HashBand> {
@@ -123,24 +154,13 @@ object CandidateBucketer {
     private fun allMetadataCompatiblePairs(
         candidates: List<PerceptualCandidate>,
         policy: AnalysisPolicy,
-    ): List<CandidatePair> {
-        val pairs = mutableListOf<CandidatePair>()
+    ): CandidateGenerationResult = collectPairs(candidates, policy, distance = { _, _ -> 0 }) generator@{ attempt ->
         for (leftIndex in 0 until candidates.lastIndex) {
             for (rightIndex in leftIndex + 1 until candidates.size) {
-                if (metadataCompatible(candidates[leftIndex], candidates[rightIndex], policy)) {
-                    pairs += canonicalPair(candidates[leftIndex], candidates[rightIndex])
-                }
+                if (!attempt(leftIndex, rightIndex)) return@generator false
             }
         }
-        return pairs
-    }
-
-    private fun addBandHit(
-        hits: MutableSet<CandidatePair>,
-        left: PerceptualCandidate,
-        right: PerceptualCandidate,
-    ) {
-        hits += canonicalPair(left, right)
+        true
     }
 
     private fun metadataCompatible(
@@ -163,25 +183,6 @@ object CandidateBucketer {
         return if (upper < Long.MIN_VALUE + maxGapMillis) true else lower >= upper - maxGapMillis
     }
 
-    private fun aspectCell(candidate: PerceptualCandidate, policy: AnalysisPolicy): Long {
-        val cellWidth = policy.maxAspectRatioDelta.takeIf { it > 0.0 } ?: 1.0
-        return floor(normalizedAspectRatio(candidate) / cellWidth).toLong()
-    }
-
-    private fun timeCell(capturedAtEpochMillis: Long, policy: AnalysisPolicy): Long =
-        if (policy.maxCaptureGapMillis == 0L) capturedAtEpochMillis else capturedAtEpochMillis.floorDiv(policy.maxCaptureGapMillis)
-
-    private fun neighboringCells(cell: Long): List<Long> = buildList(3) {
-        if (cell != Long.MIN_VALUE) add(cell - 1)
-        add(cell)
-        if (cell != Long.MAX_VALUE) add(cell + 1)
-    }
-
-    private fun sharesBand(left: Long, right: Long, maxPerceptualDistance: Int): Boolean =
-        bandsFor(left, maxPerceptualDistance).toSet().intersect(bandsFor(right, maxPerceptualDistance).toSet()).isNotEmpty()
-
     private fun canonicalPair(left: PerceptualCandidate, right: PerceptualCandidate): CandidatePair =
         if (left.assetId.value < right.assetId.value) CandidatePair(left.assetId, right.assetId) else CandidatePair(right.assetId, left.assetId)
-
-    private data class MetadataPartition(val aspectCell: Long, val timeCell: Long)
 }
