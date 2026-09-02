@@ -47,12 +47,24 @@ enum class EvidenceReason {
 data class ExactDuplicate(
     val assetIds: List<AssetId>,
     val reason: EvidenceReason = EvidenceReason.IdenticalContent,
-)
+) {
+    init {
+        require(assetIds.size >= 2 && assetIds.toSet().size == assetIds.size) {
+            "Exact duplicate evidence requires at least two distinct assets"
+        }
+    }
+}
 
 data class NearDuplicate(
     val assetIds: List<AssetId>,
     val reason: EvidenceReason = EvidenceReason.VisuallySimilar,
-)
+) {
+    init {
+        require(assetIds.size >= 2 && assetIds.toSet().size == assetIds.size) {
+            "Near duplicate evidence requires at least two distinct assets"
+        }
+    }
+}
 
 data class BlurCandidate(
     val assetId: AssetId,

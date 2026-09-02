@@ -51,4 +51,17 @@ class AnalysisPolicyTest {
             BlurPolicy(Double.POSITIVE_INFINITY, 0.1)
         }
     }
+
+    @Test
+    fun duplicateEvidenceRequiresTwoDistinctAssets() {
+        val first = AssetId("first")
+        val second = AssetId("second")
+
+        assertFailsWith<IllegalArgumentException> { ExactDuplicate(emptyList()) }
+        assertFailsWith<IllegalArgumentException> { NearDuplicate(listOf(first)) }
+        assertFailsWith<IllegalArgumentException> { ExactDuplicate(listOf(first, first)) }
+        assertFailsWith<IllegalArgumentException> { NearDuplicate(listOf(second, second)) }
+        ExactDuplicate(listOf(first, second))
+        NearDuplicate(listOf(first, second))
+    }
 }
