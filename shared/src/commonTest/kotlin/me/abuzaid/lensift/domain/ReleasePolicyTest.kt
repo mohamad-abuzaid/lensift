@@ -7,15 +7,15 @@ import kotlin.test.assertTrue
 class ReleasePolicyTest {
     @Test
     fun releasePoliciesLockTheSelectedCorpusAndAnalyzerVersions() {
-        assertEquals("synthetic-corpus-v1", ReleasePolicies.corpusVersion)
+        assertEquals("synthetic-corpus-v2", ReleasePolicies.corpusVersion)
         assertEquals("shared-analysis-v1", ReleasePolicies.analyzerVersion)
     }
 
     @Test
     fun releasePoliciesLockTheSelectedNumericValues() {
-        assertPolicy(ReleasePolicies.conservative, Sensitivity.Conservative, 20, 180_000L, 0.04, 5.615785965522273E-4, 0.0)
-        assertPolicy(ReleasePolicies.balanced, Sensitivity.Balanced, 20, 180_000L, 0.04, 5.753471953795763E-4, 0.0)
-        assertPolicy(ReleasePolicies.broad, Sensitivity.Broad, 20, 180_000L, 0.04, 5.753471953795763E-4, 0.0)
+        assertPolicy(ReleasePolicies.conservative, Sensitivity.Conservative, 19, 180_000L, 0.04, 5.223295514542475E-4, 0.0)
+        assertPolicy(ReleasePolicies.balanced, Sensitivity.Balanced, 19, 180_000L, 0.04, 5.341212412216976E-4, 0.0)
+        assertPolicy(ReleasePolicies.broad, Sensitivity.Broad, 19, 180_000L, 0.04, 5.341212412216976E-4, 0.0)
     }
 
     @Test

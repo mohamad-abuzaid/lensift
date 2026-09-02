@@ -1,6 +1,7 @@
 package me.abuzaid.lensift.quality
 
 import me.abuzaid.lensift.analysis.CandidatePair
+import me.abuzaid.lensift.analysis.PerceptualHash
 import me.abuzaid.lensift.domain.AssetId
 import me.abuzaid.lensift.domain.LumaFrame
 import kotlin.math.abs
@@ -9,7 +10,7 @@ import kotlin.math.abs
 data class CorpusAsset(
     val id: AssetId,
     val sourceFamilyId: String,
-    val contentSignature: String,
+    val rawBytes: ByteArray,
     val frame: LumaFrame,
     val capturedAtEpochMillis: Long,
 )
@@ -22,6 +23,8 @@ class DevelopmentCorpus internal constructor(
     val exactLabels: Set<CandidatePair>,
     val nearLabels: Set<CandidatePair>,
     val blurLabels: Set<AssetId>,
+    val exactNegativeAssetIds: Set<AssetId>,
+    val nearHardNegativePairs: Set<CandidatePair>,
 ) {
     val sourceFamilyCount: Int get() = sourceFamilyIds.size
 }
@@ -36,35 +39,39 @@ class EmbargoedTestPartition internal constructor(
 
 object SyntheticCorpus {
     const val SEED: Long = 2_026_090_201L
-    const val VERSION: String = "synthetic-corpus-v1"
+    const val VERSION: String = "synthetic-corpus-v2"
     private const val WIDTH = 64
     private const val HEIGHT = 64
     private const val DEVELOPMENT_FAMILY_COUNT = 40
     private const val TOTAL_FAMILY_COUNT = 48
 
-    val development: DevelopmentCorpus = generate().development
-    val test: EmbargoedTestPartition = generate().test
+    val development: DevelopmentCorpus = generate(SEED).development
+    val test: EmbargoedTestPartition = generate(SEED).test
 
-    fun regenerateDevelopment(): DevelopmentCorpus = generate().development
+    fun regenerateDevelopment(): DevelopmentCorpus = generate(SEED).development
 
-    private fun generate(): GeneratedCorpus {
+    private fun generate(seed: Long): GeneratedCorpus {
         val developmentAssets = mutableListOf<CorpusAsset>()
         val developmentExact = linkedSetOf<CandidatePair>()
         val developmentNear = linkedSetOf<CandidatePair>()
         val developmentBlur = linkedSetOf<AssetId>()
+        val developmentExactNegatives = linkedSetOf<AssetId>()
+        val developmentNearHardNegatives = linkedSetOf<CandidatePair>()
         val developmentFamilies = linkedSetOf<String>()
         val testFamilies = linkedSetOf<String>()
         var testVariantCount = 0
 
         repeat(TOTAL_FAMILY_COUNT) { familyIndex ->
             val familyId = "family-${(familyIndex + 1).toString().padStart(2, '0')}"
-            val generated = generateFamily(familyId, familyIndex)
+            val generated = generateFamily(familyId, familyIndex, seed)
             if (familyIndex < DEVELOPMENT_FAMILY_COUNT) {
                 developmentFamilies += familyId
                 developmentAssets += generated.assets
                 developmentExact += generated.exactLabels
                 developmentNear += generated.nearLabels
                 developmentBlur += generated.blurLabels
+                developmentExactNegatives += generated.exactNegativeAssetIds
+                developmentNearHardNegatives += generated.nearHardNegativePairs
             } else {
                 testFamilies += familyId
                 testVariantCount += generated.assets.size
@@ -79,20 +86,23 @@ object SyntheticCorpus {
                 exactLabels = developmentExact,
                 nearLabels = developmentNear,
                 blurLabels = developmentBlur,
+                exactNegativeAssetIds = developmentExactNegatives,
+                nearHardNegativePairs = developmentNearHardNegatives,
             ),
             EmbargoedTestPartition(testFamilies, testVariantCount),
         )
     }
 
-    private fun generateFamily(familyId: String, familyIndex: Int): GeneratedFamily {
-        val source = baseFrame(familyIndex)
+    private fun generateFamily(familyId: String, familyIndex: Int, seed: Long): GeneratedFamily {
+        val familySeed = familySeed(seed, familyIndex)
+        val source = baseFrame(familySeed)
         val capturedAt = 1_700_000_000_000L + familyIndex * 1_000_000L
-        val first = asset(familyId, "source", "bytes-$familyId-source", source, capturedAt)
+        val first = asset(familyId, "source", source, capturedAt)
         val kind = FamilyKind.entries[familyIndex % FamilyKind.entries.size]
 
         return when (kind) {
             FamilyKind.ExactCopy -> {
-                val copy = asset(familyId, "copy", first.contentSignature, source, capturedAt + 5_000L)
+                val copy = asset(familyId, "copy", source, capturedAt + 5_000L)
                 GeneratedFamily(listOf(first, copy), exactLabels = setOf(pair(first, copy)))
             }
             FamilyKind.Recompression -> nearFamily(first, recompress(source), capturedAt + 12_000L)
@@ -102,14 +112,22 @@ object SyntheticCorpus {
             FamilyKind.Burst -> nearFamily(first, translate(source, 1, 0), capturedAt + burstGapMillis(familyIndex))
             FamilyKind.SharpMotion -> nearFamily(first, sharpMotion(source), capturedAt + 45_000L)
             FamilyKind.IntentionalBokeh -> GeneratedFamily(
-                listOf(asset(familyId, "bokeh", "bytes-$familyId-bokeh", bokehFrame(familyIndex), capturedAt)),
+                listOf(asset(familyId, "bokeh", bokehFrame(familySeed), capturedAt)),
             )
             FamilyKind.UniformWall -> GeneratedFamily(
-                listOf(asset(familyId, "wall", "bytes-$familyId-wall", uniformWall(familyIndex), capturedAt)),
+                listOf(asset(familyId, "wall", uniformWall(familySeed), capturedAt)),
             )
             FamilyKind.SyntheticBlur -> {
-                val blurred = asset(familyId, "blurred", "bytes-$familyId-blurred", boxBlur(source, 3), capturedAt)
+                val blurred = asset(familyId, "blurred", boxBlur(source, 3), capturedAt)
                 GeneratedFamily(listOf(blurred), blurLabels = setOf(blurred.id))
+            }
+            FamilyKind.NearHardNegative -> {
+                val negative = asset(familyId, "hard-negative", hardNegative(source, familySeed), capturedAt + 60_000L)
+                GeneratedFamily(
+                    assets = listOf(first, negative),
+                    exactNegativeAssetIds = setOf(first.id, negative.id),
+                    nearHardNegativePairs = setOf(pair(first, negative)),
+                )
             }
         }
     }
@@ -118,7 +136,6 @@ object SyntheticCorpus {
         val variant = asset(
             source.sourceFamilyId,
             "variant",
-            "bytes-${source.sourceFamilyId}-variant",
             frame,
             capturedAt,
         )
@@ -128,13 +145,12 @@ object SyntheticCorpus {
     private fun asset(
         familyId: String,
         suffix: String,
-        signature: String,
         frame: LumaFrame,
         capturedAt: Long,
     ): CorpusAsset = CorpusAsset(
         id = AssetId("$familyId-$suffix"),
         sourceFamilyId = familyId,
-        contentSignature = signature,
+        rawBytes = frame.pixels,
         frame = frame,
         capturedAtEpochMillis = capturedAt,
     )
@@ -172,6 +188,27 @@ object SyntheticCorpus {
 
     private fun sharpMotion(frame: LumaFrame): LumaFrame = map(frame) { value, x, _ ->
         if (x % 16 == 0) value + 8 else value
+    }
+
+    private fun hardNegative(frame: LumaFrame, seed: Int): LumaFrame {
+        val sourceHash = PerceptualHash.compute(frame)
+        return (1..48)
+            .map { trial -> independentScene(frame, seed, trial) }
+            .minWithOrNull(
+                compareBy<LumaFrame> { candidate ->
+                    if (PerceptualHash.distance(sourceHash, PerceptualHash.compute(candidate)) in 15..20) 0 else 1
+                }.thenBy { candidate -> abs(PerceptualHash.distance(sourceHash, PerceptualHash.compute(candidate)) - 18) },
+            )!!
+    }
+
+    /** A deliberately separate synthetic subject that can collide with the source's low-frequency pHash. */
+    private fun independentScene(frame: LumaFrame, seed: Int, trial: Int): LumaFrame = map(frame) { value, x, y ->
+        val centerX = 8 + (seed ushr (trial % 13) and 31)
+        val centerY = 8 + (seed ushr ((trial + 7) % 13) and 31)
+        val radius = 4 + trial % 14
+        val subject = if ((x - centerX) * (x - centerX) + (y - centerY) * (y - centerY) <= radius * radius) 30 + trial * 3 else 0
+        val texture = if ((x * (trial + 3) + y * (trial + 5) + seed) % 5 == 0) 18 else -6
+        value + subject + texture
     }
 
     private fun crop(frame: LumaFrame, left: Int, top: Int, width: Int, height: Int): LumaFrame = LumaFrame(
@@ -242,8 +279,13 @@ object SyntheticCorpus {
 
     private fun burstGapMillis(familyIndex: Int): Long = listOf(10_000L, 25_000L, 55_000L, 85_000L, 115_000L, 175_000L)[familyIndex % 6]
 
+    private fun familySeed(seed: Long, familyIndex: Int): Int {
+        val mixed = (seed + (familyIndex + 1L) * 1_103_515_245L) xor (seed ushr 17)
+        return (mixed xor (mixed ushr 32)).toInt()
+    }
+
     private enum class FamilyKind {
-        ExactCopy, Recompression, Resize, Brightness, Crop, Burst, SharpMotion, IntentionalBokeh, UniformWall, SyntheticBlur,
+        ExactCopy, Recompression, Resize, Brightness, Crop, Burst, SharpMotion, IntentionalBokeh, UniformWall, SyntheticBlur, NearHardNegative,
     }
 
     private data class GeneratedFamily(
@@ -251,6 +293,8 @@ object SyntheticCorpus {
         val exactLabels: Set<CandidatePair> = emptySet(),
         val nearLabels: Set<CandidatePair> = emptySet(),
         val blurLabels: Set<AssetId> = emptySet(),
+        val exactNegativeAssetIds: Set<AssetId> = emptySet(),
+        val nearHardNegativePairs: Set<CandidatePair> = emptySet(),
     )
 
     private data class GeneratedCorpus(val development: DevelopmentCorpus, val test: EmbargoedTestPartition)

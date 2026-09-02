@@ -7,6 +7,7 @@ import me.abuzaid.lensift.analysis.CandidateBucketer
 import me.abuzaid.lensift.analysis.CandidatePair
 import me.abuzaid.lensift.analysis.PerceptualCandidate
 import me.abuzaid.lensift.analysis.PerceptualHash
+import me.abuzaid.lensift.analysis.Sha256
 import me.abuzaid.lensift.domain.AnalysisPolicy
 import me.abuzaid.lensift.domain.AssetId
 import me.abuzaid.lensift.domain.BlurPolicy
@@ -26,6 +27,9 @@ data class QualityMetrics(
 /** Keeps prediction construction separate from source-family labels. */
 object QualityEvaluator {
     fun evaluate(corpus: DevelopmentCorpus, policy: AnalysisPolicy): QualityMetrics = PreparedCorpus(corpus).evaluate(policy)
+    fun exactPredictions(corpus: DevelopmentCorpus): Set<CandidatePair> = PreparedCorpus(corpus).exactPredictions
+    fun nearPredictions(corpus: DevelopmentCorpus, policy: AnalysisPolicy): Set<CandidatePair> =
+        PreparedCorpus(corpus).nearPredictions(policy)
 }
 
 data class PolicySelection(
@@ -137,7 +141,9 @@ object PolicySelector {
 }
 
 private class PreparedCorpus(private val corpus: DevelopmentCorpus) {
-    private val byId = corpus.assets.associateBy(CorpusAsset::id)
+    private val contentSignatures = corpus.assets.associate { asset ->
+        asset.id to Sha256().update(asset.rawBytes).digestHex()
+    }
     private val candidates = corpus.assets.map { asset ->
         PerceptualCandidate(
             assetId = asset.id,
@@ -152,10 +158,13 @@ private class PreparedCorpus(private val corpus: DevelopmentCorpus) {
     private val blurCache = mutableMapOf<BlurPolicy, BinaryMetrics>()
 
     val exactMetrics: BinaryMetrics by lazy {
-        val predicted = allPairs(corpus.assets.filter { asset ->
-            corpus.assets.count { it.contentSignature == asset.contentSignature } > 1
-        }).filter { (first, second) -> byId.getValue(first).contentSignature == byId.getValue(second).contentSignature }.toSet()
-        metrics(predicted, corpus.exactLabels)
+        metrics(exactPredictions, corpus.exactLabels)
+    }
+
+    val exactPredictions: Set<CandidatePair> by lazy {
+        allPairs(corpus.assets)
+            .filter { (first, second) -> contentSignatures.getValue(first) == contentSignatures.getValue(second) }
+            .toSet()
     }
 
     fun evaluate(policy: AnalysisPolicy): QualityMetrics = QualityMetrics(
@@ -167,11 +176,12 @@ private class PreparedCorpus(private val corpus: DevelopmentCorpus) {
     fun nearMetrics(policy: AnalysisPolicy): BinaryMetrics = nearCache.getOrPut(
         NearThresholds(policy.maxPerceptualDistance, policy.maxCaptureGapMillis, policy.maxAspectRatioDelta),
     ) {
-        val predicted = CandidateBucketer.find(candidates, policy)
-            .filter { pair -> byId.getValue(pair.first).contentSignature != byId.getValue(pair.second).contentSignature }
-            .toSet()
-        metrics(predicted, corpus.nearLabels)
+        metrics(nearPredictions(policy), corpus.nearLabels)
     }
+
+    fun nearPredictions(policy: AnalysisPolicy): Set<CandidatePair> = CandidateBucketer.find(candidates, policy)
+        .filter { pair -> contentSignatures.getValue(pair.first) != contentSignatures.getValue(pair.second) }
+        .toSet()
 
     fun blurMetrics(policy: BlurPolicy): BinaryMetrics = blurCache.getOrPut(policy) {
         val predicted = blurEvidence
@@ -190,10 +200,7 @@ private class PreparedCorpus(private val corpus: DevelopmentCorpus) {
         .sortedWith(compareBy<BlurPolicy> { it.laplacianVarianceCeiling }.thenBy { it.edgeDensityCeiling })
 
     fun missedNear(policy: AnalysisPolicy): Set<CandidatePair> {
-        val predicted = CandidateBucketer.find(candidates, policy)
-            .filter { pair -> byId.getValue(pair.first).contentSignature != byId.getValue(pair.second).contentSignature }
-            .toSet()
-        return corpus.nearLabels - predicted
+        return corpus.nearLabels - nearPredictions(policy)
     }
 
     private fun <T> metrics(predicted: Set<T>, labels: Set<T>): BinaryMetrics = BinaryMetrics(

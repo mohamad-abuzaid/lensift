@@ -4,15 +4,17 @@ This is a deterministic **development corpus, not field validation**. It is desi
 
 ## Provenance and split
 
-`SyntheticCorpus` generates version `synthetic-corpus-v1` from seed `2026090201`. It uses no private/user photographs, decoders, platform APIs, or network access. There are 48 source families: 40 development families and 8 embargoed test families. A source family and every one of its variants are assigned together; there is no variant-level split.
+`SyntheticCorpus` generates version `synthetic-corpus-v2` from seed `2026090201`. The seed is mixed into each family luma-pattern parameter, so it materially determines generated pixels while preserving repeatability. It uses no private/user photographs, decoders, platform APIs, or network access. There are 48 source families: 40 development families and 8 embargoed test families. A source family and every one of its variants are assigned together; there is no variant-level split.
 
 Each family is a 64 by 64 deterministic luma pattern made from checker, diagonal, and ripple terms. Its generated variants cover byte-identical copies, 4-bit quantized recompression, nearest-neighbor resize to 63 by 64, brightness plus 18, a one-pixel crop, a burst-like one-pixel translation at 10 to 175 seconds, and a sharp high-frequency motion-streak perturbation. Negative blur examples include intentional bokeh circles and low-texture uniform walls. Positive blur examples use a deterministic radius-3 box blur.
 
-The development split contains 68 assets, 4 exact-pair labels, 24 near-pair labels, and 4 blur labels. The 8-family test split contains 15 generated variants, but it exposes only family IDs and that variant count through `EmbargoedTestPartition`; it deliberately does not expose samples or labels to `QualityEvaluator` or `PolicySelector`. That type boundary, plus `AnalysisQualityTest`, prevents Task 8 selection or measurement from touching the test split. Plan 05 is the first planned point at which its labels may be opened for final evaluation.
+The development split contains 71 assets, 4 exact-pair labels, 24 near-pair labels, and 3 blur labels. It additionally contains three provenance-labelled near hard-negative pairs: each has the same capture-time and aspect neighborhoods as a near candidate, but represents a separately labelled synthetic subject and is not a near label. Their deterministic generator picks, from 48 independent-subject candidates, a real pHash distance in the 15 to 20 cutoff band closest to 18. These pairs are also distinct exact negatives: exact prediction hashes deterministic raw bytes with production `Sha256`, rather than copying a corpus signature field.
+
+The 8-family test split contains 16 generated variants, but it exposes only family IDs and that variant count through `EmbargoedTestPartition`; it deliberately does not expose samples or labels to `QualityEvaluator` or `PolicySelector`. That type boundary, plus `AnalysisQualityTest`, prevents Task 8 selection or measurement from touching the test split. Plan 05 is the first planned point at which its labels may be opened for final evaluation.
 
 ## Evaluation and policy search
 
-Labels are generated from source-family provenance. Predictions are generated separately: exact pairs come from equal content signatures; near pairs come from `PerceptualHash` plus `CandidateBucketer`; blur predictions come from `BlurAnalyzer`. For each task the gate records independent TP, FP, and FN, then precision and recall.
+Labels are generated from source-family provenance. Predictions are generated separately: exact pairs come from `Sha256` hashes of deterministic raw bytes; near pairs come from `PerceptualHash` plus `CandidateBucketer`; blur predictions come from `BlurAnalyzer`. For each task the gate records independent TP, FP, and FN, then precision and recall. The hard negatives ensure near precision is exercised by real false-positive candidates rather than a labels-only success case.
 
 The selector evaluates the development split only. Its grid is pHash distance 0 through 20, capture window 15/30/60/90/120/180 seconds, and normalized aspect delta 0.005/0.01/0.02/0.04. Blur ceilings are paired, observed `(laplacian variance, edge density)` cut points from the generated development frames. Candidates must have exact precision and recall of 1.00, near precision of at least 0.90 and recall of at least 0.85, and blur precision of at least 0.85.
 
@@ -24,11 +26,11 @@ Analyzer version `shared-analysis-v1` selected these policies:
 
 | Sensitivity | pHash | capture window | aspect delta | laplacian ceiling | edge ceiling |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Conservative | 20 | 180 s | 0.04 | 0.0005615785965522273 | 0.0 |
-| Balanced | 20 | 180 s | 0.04 | 0.0005753471953795763 | 0.0 |
-| Broad | 20 | 180 s | 0.04 | 0.0005753471953795763 | 0.0 |
+| Conservative | 19 | 180 s | 0.04 | 0.0005223295514542475 | 0.0 |
+| Balanced | 19 | 180 s | 0.04 | 0.0005341212412216976 | 0.0 |
+| Broad | 19 | 180 s | 0.04 | 0.0005341212412216976 | 0.0 |
 
-Balanced metrics are exact TP/FP/FN `4/0/0` (precision/recall `1.00/1.00`), near `23/0/1` (`1.00/0.9583`), and blur `4/0/0` (`1.00/1.00`). Broad equals Balanced because no strictly wider grid tuple preserves the precision gates. `ReleasePolicyTest` locks the numeric values, versions, and monotonic ordering.
+Balanced metrics are exact TP/FP/FN `4/0/0` (precision/recall `1.00/1.00`), near `24/1/0` (`0.96/1.00`), and blur `2/0/1` (`1.00/0.6667`). Broad equals Balanced because no strictly wider grid tuple preserves the precision gates. `ReleasePolicyTest` locks the numeric values, versions, and monotonic ordering.
 
 ## Known blind spots
 
