@@ -1,0 +1,163 @@
+CREATE TABLE asset_analysis (
+  asset_id TEXT NOT NULL PRIMARY KEY,
+  source_signature TEXT NOT NULL,
+  analyzer_version INTEGER NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  byte_count INTEGER,
+  captured_at_ms INTEGER,
+  is_favorite INTEGER AS kotlin.Boolean NOT NULL,
+  is_edited INTEGER AS kotlin.Boolean NOT NULL,
+  perceptual_hash INTEGER NOT NULL,
+  sha256 TEXT,
+  laplacian_variance REAL NOT NULL,
+  edge_density REAL NOT NULL,
+  analyzed_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX asset_analysis_perceptual_hash_index
+ON asset_analysis(perceptual_hash);
+
+CREATE INDEX asset_analysis_captured_at_index
+ON asset_analysis(captured_at_ms);
+
+CREATE INDEX asset_analysis_source_version_index
+ON asset_analysis(source_signature, analyzer_version);
+
+CREATE TABLE cleanup_history (
+  id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+  completed_at_ms INTEGER NOT NULL,
+  exact_count INTEGER NOT NULL,
+  near_count INTEGER NOT NULL,
+  blur_count INTEGER NOT NULL,
+  confirmed_estimated_bytes INTEGER NOT NULL
+);
+
+CREATE TABLE finding_group (
+  group_id TEXT NOT NULL PRIMARY KEY,
+  kind TEXT NOT NULL,
+  policy_key TEXT NOT NULL,
+  estimated_recoverable_bytes INTEGER NOT NULL,
+  reviewed INTEGER AS kotlin.Boolean NOT NULL DEFAULT 0
+);
+
+CREATE TABLE finding_member (
+  group_id TEXT NOT NULL REFERENCES finding_group(group_id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES asset_analysis(asset_id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  is_keeper INTEGER AS kotlin.Boolean NOT NULL,
+  selected_for_removal INTEGER AS kotlin.Boolean NOT NULL,
+  PRIMARY KEY (group_id, asset_id)
+);
+
+insertAnalysisIfAbsent:
+INSERT OR IGNORE INTO asset_analysis(
+  asset_id,
+  source_signature,
+  analyzer_version,
+  width,
+  height,
+  byte_count,
+  captured_at_ms,
+  is_favorite,
+  is_edited,
+  perceptual_hash,
+  sha256,
+  laplacian_variance,
+  edge_density,
+  analyzed_at_ms
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+updateAnalysis:
+UPDATE asset_analysis
+SET source_signature = ?,
+    analyzer_version = ?,
+    width = ?,
+    height = ?,
+    byte_count = ?,
+    captured_at_ms = ?,
+    is_favorite = ?,
+    is_edited = ?,
+    perceptual_hash = ?,
+    sha256 = ?,
+    laplacian_variance = ?,
+    edge_density = ?,
+    analyzed_at_ms = ?
+WHERE asset_id = ?;
+
+attachExactHash:
+UPDATE asset_analysis
+SET sha256 = ?
+WHERE asset_id = ?;
+
+selectAnalysisById:
+SELECT *
+FROM asset_analysis
+WHERE asset_id = ?;
+
+selectAllAnalyses:
+SELECT *
+FROM asset_analysis
+ORDER BY asset_id;
+
+selectReusableAnalyses:
+SELECT *
+FROM asset_analysis
+WHERE source_signature = ? AND analyzer_version = ?
+ORDER BY asset_id;
+
+deleteAnalysisById:
+DELETE FROM asset_analysis
+WHERE asset_id = ?;
+
+deleteFindingGroupsForAsset:
+DELETE FROM finding_group
+WHERE group_id IN (
+  SELECT group_id
+  FROM finding_member
+  WHERE asset_id = ?
+);
+
+insertCleanupHistory:
+INSERT INTO cleanup_history(
+  completed_at_ms,
+  exact_count,
+  near_count,
+  blur_count,
+  confirmed_estimated_bytes
+)
+VALUES (?, ?, ?, ?, ?);
+
+selectCleanupHistory:
+SELECT completed_at_ms, exact_count, near_count, blur_count, confirmed_estimated_bytes
+FROM cleanup_history
+ORDER BY completed_at_ms DESC, id DESC;
+
+insertFindingGroup:
+INSERT INTO finding_group(
+  group_id,
+  kind,
+  policy_key,
+  estimated_recoverable_bytes,
+  reviewed
+)
+VALUES (?, ?, ?, ?, ?);
+
+insertFindingMember:
+INSERT INTO finding_member(
+  group_id,
+  asset_id,
+  position,
+  is_keeper,
+  selected_for_removal
+)
+VALUES (?, ?, ?, ?, ?);
+
+countFindingGroups:
+SELECT count(*)
+FROM finding_group;
+
+countFindingMembers:
+SELECT count(*)
+FROM finding_member;
