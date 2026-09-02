@@ -2,7 +2,9 @@
 
 **Date:** 2026-09-02
 
-**Status:** Approved design, pending written-spec review
+**Status:** Approved
+
+**Implementation roadmap:** `docs/superpowers/plans/2026-09-02-lensift-implementation-roadmap.md`
 
 **Delivery target:** Portfolio-ready release in 6–8 weeks
 
