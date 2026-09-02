@@ -24,6 +24,7 @@ kotlin {
         binaries.framework {
             baseName = "Shared"
             isStatic = true
+            freeCompilerArgs += "-Xoverride-konan-properties=minVersion.ios=16.0"
         }
     }
 
