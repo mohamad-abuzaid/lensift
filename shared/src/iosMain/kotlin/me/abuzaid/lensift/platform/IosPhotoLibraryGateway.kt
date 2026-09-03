@@ -14,6 +14,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -27,6 +28,7 @@ import me.abuzaid.lensift.gateway.LibraryChange
 import me.abuzaid.lensift.gateway.PhotoLibraryGateway
 import platform.Foundation.NSData
 import platform.Foundation.NSError
+import platform.Foundation.NSLock
 import platform.Foundation.NSSortDescriptor
 import platform.Foundation.timeIntervalSince1970
 import platform.Photos.PHAccessLevelReadWrite
@@ -89,21 +91,21 @@ class IosPhotoLibraryGateway internal constructor(
     }
 
     override fun originalByteChunks(assetId: AssetId): Flow<ByteArray> = callbackFlow {
+        val delivery = OriginalStreamDelivery(
+            assetId = assetId,
+            maximumChunkBytes = ORIGINAL_CHUNK_BYTES,
+            send = { trySend(it).isSuccess },
+            close = { cause -> close(cause) },
+        )
         val request = photoKit.requestOriginalData(
             localIdentifier = assetId.toIosLocalIdentifier(),
             request = iosOriginalRequest(),
-            onData = { chunk ->
-                require(chunk.size <= ORIGINAL_CHUNK_BYTES) {
-                    "PhotoKit exceeded the requested original-data chunk size"
-                }
-                trySend(chunk.copyOf())
-            },
-            onComplete = { error ->
-                if (error == null) close() else close(error)
-            },
+            onData = delivery::onData,
+            onComplete = delivery::onComplete,
         )
-        awaitClose(request::cancel)
-    }
+        delivery.attach(request)
+        awaitClose(delivery::cancel)
+    }.buffer(capacity = ORIGINAL_STREAM_BUFFER_CAPACITY)
 
     override fun observeChanges(): Flow<LibraryChange> = callbackFlow {
         val observation = photoKit.observeImageChanges { changedIdentifiers ->
@@ -121,6 +123,7 @@ class IosPhotoLibraryGateway internal constructor(
     private companion object {
         const val MAX_LUMA_EDGE = 512
         const val ORIGINAL_CHUNK_BYTES = 64 * 1024
+        const val ORIGINAL_STREAM_BUFFER_CAPACITY = 64
         val readableAccessStates = setOf(AccessState.Full, AccessState.Partial)
     }
 }
@@ -263,6 +266,79 @@ class PhotoAssetUnavailableException(val assetId: AssetId) :
     Exception("Photo asset is not available locally: ${assetId.value}")
 
 internal class PhotoKitResourceUnavailableException(message: String) : Exception(message)
+
+/** Serializes native callback races and makes any undeliverable byte chunk terminal. */
+private class OriginalStreamDelivery(
+    private val assetId: AssetId,
+    private val maximumChunkBytes: Int,
+    private val send: (ByteArray) -> Boolean,
+    private val close: (Throwable?) -> Unit,
+) {
+    private val lock = NSLock()
+    private var terminal = false
+    private var cancellationSent = false
+    private var request: PhotoKitRequest? = null
+
+    fun attach(request: PhotoKitRequest) {
+        val cancelImmediately = withLock {
+            check(this.request == null) { "PhotoKit request was attached more than once" }
+            this.request = request
+            cancellationSent
+        }
+        if (cancelImmediately) request.cancel()
+    }
+
+    fun onData(chunk: ByteArray) {
+        var requestToCancel: PhotoKitRequest? = null
+        var failure: Throwable? = null
+        withLock {
+            if (terminal) return
+            val accepted = chunk.size <= maximumChunkBytes && send(chunk.copyOf())
+            if (!accepted) {
+                terminal = true
+                failure = PhotoKitResourceUnavailableException(
+                    "PhotoKit original-byte delivery failed for ${assetId.value}",
+                )
+                if (!cancellationSent) {
+                    cancellationSent = true
+                    requestToCancel = request
+                }
+            }
+        }
+        requestToCancel?.cancel()
+        failure?.let(close)
+    }
+
+    fun onComplete(error: Throwable?) {
+        val shouldClose = withLock {
+            if (terminal) false else {
+                terminal = true
+                true
+            }
+        }
+        if (shouldClose) close(error)
+    }
+
+    fun cancel() {
+        val requestToCancel = withLock {
+            terminal = true
+            if (cancellationSent) null else {
+                cancellationSent = true
+                request
+            }
+        }
+        requestToCancel?.cancel()
+    }
+
+    private inline fun <T> withLock(block: () -> T): T {
+        lock.lock()
+        return try {
+            block()
+        } finally {
+            lock.unlock()
+        }
+    }
+}
 
 @OptIn(ExperimentalForeignApi::class)
 private class ApplePhotoKitFacade : PhotoKitFacade {

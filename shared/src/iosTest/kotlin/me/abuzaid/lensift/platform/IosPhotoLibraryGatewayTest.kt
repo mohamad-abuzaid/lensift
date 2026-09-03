@@ -2,7 +2,9 @@ package me.abuzaid.lensift.platform
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -223,6 +225,24 @@ class IosPhotoLibraryGatewayTest {
         assertEquals(1, suspended.openOriginalRequests)
         job.cancelAndJoin()
         assertEquals(1, suspended.cancelledOriginalRequests)
+    }
+
+    @Test
+    fun `original stream fails closed when native producer outruns bounded consumer`() = runTest {
+        val produced = List(100) { byteArrayOf(it.toByte()) }
+        val facade = FakePhotoKitFacade(originalChunks = produced)
+        val received = mutableListOf<ByteArray>()
+
+        assertFailsWith<PhotoKitResourceUnavailableException> {
+            gateway(facade)
+                .originalByteChunks(AssetId("ios-photo:backpressure"))
+                .onEach { delay(1) }
+                .toList(received)
+        }
+
+        assertTrue(received.size < produced.size)
+        assertEquals(1, facade.cancelledOriginalRequests)
+        assertEquals(0, facade.openOriginalRequests)
     }
 
     @Test
