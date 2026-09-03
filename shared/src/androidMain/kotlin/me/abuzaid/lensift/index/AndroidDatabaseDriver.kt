@@ -38,13 +38,4 @@ internal fun <C> createConfiguredLensiftDriver(
     return driver
 }
 
-internal fun SqlDriver.enableLensiftForeignKeys() {
-    execute(
-        identifier = null,
-        sql = "PRAGMA foreign_keys=ON",
-        parameters = 0,
-        binders = null,
-    ).value
-}
-
 private const val LENSIFT_DATABASE_NAME = "lensift.db"
