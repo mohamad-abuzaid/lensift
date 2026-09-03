@@ -77,8 +77,79 @@ class AndroidPhotoLibraryGatewayTest {
         assertEquals(AssetId("android-media:41"), descriptors.single().id)
         assertNull(descriptors.single().byteCount)
         assertNull(descriptors.single().capturedAtEpochMillis)
-        assertTrue(resolver.lastQuery!!.stillImagesOnly)
-        assertEquals(MediaImageColumn.entries.toSet(), resolver.lastQuery!!.columns.toSet())
+        assertEquals(androidMediaStoreImageQuery(), resolver.lastQuery)
+    }
+
+    @Test
+    fun `production MediaStore query projects and filters the required image columns`() {
+        val query = androidMediaStoreImageQuery()
+
+        assertEquals(
+            listOf(
+                "_id",
+                "width",
+                "height",
+                "_size",
+                "datetaken",
+                "date_modified",
+                "orientation",
+                "is_favorite",
+            ),
+            query.projection,
+        )
+        assertEquals("media_type = ?", query.selection)
+        assertEquals(listOf("1"), query.selectionArguments)
+        assertEquals("datetaken DESC, _id ASC", query.sortOrder)
+    }
+
+    @Test
+    fun `production raw-row mapper uses projected columns and normalizes provider sentinels`() {
+        val rawValues = MapMediaStoreRowValues(
+            mapOf(
+                "_id" to 84L,
+                "width" to 4032L,
+                "height" to 3024L,
+                "_size" to -1L,
+                "datetaken" to 0L,
+                "date_modified" to null,
+                "orientation" to -90L,
+                "is_favorite" to null,
+            ),
+        )
+
+        val row = rawValues.toMediaImageRow()
+        val descriptor = row.toPhotoDescriptor()
+
+        assertEquals(
+            MediaImageRow(
+                id = 84,
+                width = 4032,
+                height = 3024,
+                byteCount = -1,
+                capturedAtMillis = 0,
+                modifiedAtSeconds = null,
+                orientationDegrees = -90,
+                isFavorite = null,
+            ),
+            row,
+        )
+        assertEquals(AssetId("android-media:84"), descriptor.id)
+        assertNull(descriptor.byteCount)
+        assertNull(descriptor.capturedAtEpochMillis)
+        assertFalse(descriptor.isFavorite)
+        assertEquals(
+            "android-v1|w=4032|h=3024|s=null|taken=null|modified=null|orientation=270|favorite=false",
+            descriptor.contentSignature,
+        )
+    }
+
+    @Test
+    fun `opaque IDs are the only inputs converted to MediaStore content IDs`() {
+        assertEquals(AssetId("android-media:91"), 91L.toAndroidAssetId())
+        assertEquals(91L, AssetId("android-media:91").toAndroidMediaId())
+        assertFailsWith<IllegalArgumentException> {
+            AssetId("content://media/external/images/media/91").toAndroidMediaId()
+        }
     }
 
     @Test
@@ -95,7 +166,7 @@ class AndroidPhotoLibraryGatewayTest {
         val ids = gateway(resolver = resolver).enumerateAccessibleImages().toList().map { it.id.value }
 
         assertEquals(listOf("android-media:1", "android-media:4", "android-media:7", "android-media:9"), ids)
-        assertEquals(MediaStoreSort.NewestFirstThenId, resolver.lastQuery!!.sort)
+        assertEquals("datetaken DESC, _id ASC", resolver.lastQuery!!.sortOrder)
     }
 
     @Test
@@ -314,12 +385,12 @@ private class FakeContentResolver(
     private val failAtRow: Int? = null,
     private val byteSource: ByteSourceFacade = FakeByteSource(ByteArray(0)),
 ) : ContentResolverFacade {
-    var lastQuery: MediaStoreQuery? = null
+    var lastQuery: MediaStoreQuerySpec? = null
     var lastCursor: FakeImageCursor? = null
     var unregisterCount = 0
     private var observer: (() -> Unit)? = null
 
-    override fun queryImages(query: MediaStoreQuery): ImageCursorFacade {
+    override fun queryImages(query: MediaStoreQuerySpec): ImageCursorFacade {
         lastQuery = query
         return FakeImageCursor(rows, failAtRow).also { lastCursor = it }
     }
@@ -335,6 +406,12 @@ private class FakeContentResolver(
     }
 
     fun notifyChange() = observer?.invoke() ?: Unit
+}
+
+private class MapMediaStoreRowValues(
+    private val values: Map<String, Long?>,
+) : MediaStoreRowValues {
+    override fun long(column: String): Long? = values[column]
 }
 
 private class FakeImageCursor(

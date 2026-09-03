@@ -50,7 +50,7 @@ class AndroidPhotoLibraryGateway internal constructor(
         if (currentAccess() !in readableAccessStates) return@flow
 
         val rows = ArrayList<MediaImageRow>()
-        resolver.queryImages(defaultQuery).use { cursor ->
+        resolver.queryImages(androidMediaStoreImageQuery()).use { cursor ->
             while (cursor.moveToNext()) {
                 currentCoroutineContext().ensureActive()
                 cursor.currentRow().takeIf { it.width > 0 && it.height > 0 }?.let(rows::add)
@@ -59,17 +59,17 @@ class AndroidPhotoLibraryGateway internal constructor(
 
         rows.sortedWith(mediaImageOrder).forEach { row ->
             currentCoroutineContext().ensureActive()
-            emit(row.toDescriptor())
+            emit(row.toPhotoDescriptor())
         }
     }.flowOn(Dispatchers.IO)
 
     override suspend fun decodeLuma(assetId: AssetId, targetLongestEdge: Int): LumaFrame {
         require(targetLongestEdge > 0) { "Target longest edge must be positive" }
-        return lumaDecoder.decode(assetId.mediaId(), minOf(targetLongestEdge, MAX_LUMA_EDGE))
+        return lumaDecoder.decode(assetId.toAndroidMediaId(), minOf(targetLongestEdge, MAX_LUMA_EDGE))
     }
 
     override fun originalByteChunks(assetId: AssetId): Flow<ByteArray> = flow {
-        val source = resolver.openOriginal(assetId.mediaId())
+        val source = resolver.openOriginal(assetId.toAndroidMediaId())
         source.use {
             val buffer = ByteArray(ORIGINAL_CHUNK_BYTES)
             while (true) {
@@ -91,56 +91,11 @@ class AndroidPhotoLibraryGateway internal constructor(
         awaitClose(registration::close)
     }
 
-    private fun MediaImageRow.toDescriptor(): PhotoDescriptor {
-        val normalizedByteCount = byteCount?.takeIf { it >= 0 }
-        val normalizedCapturedAt = capturedAtMillis?.takeIf { it > 0 }
-        val normalizedModifiedAt = modifiedAtSeconds?.takeIf { it > 0 }
-        val favorite = isFavorite == true
-        return PhotoDescriptor(
-            id = AssetId("$ASSET_ID_PREFIX$id"),
-            contentSignature = buildString {
-                append("android-v1")
-                append("|w=").append(width)
-                append("|h=").append(height)
-                append("|s=").append(normalizedByteCount ?: "null")
-                append("|taken=").append(normalizedCapturedAt ?: "null")
-                append("|modified=").append(normalizedModifiedAt ?: "null")
-                append("|orientation=").append(normalizedOrientation)
-                append("|favorite=").append(favorite)
-            },
-            width = width,
-            height = height,
-            byteCount = normalizedByteCount,
-            capturedAtEpochMillis = normalizedCapturedAt,
-            isFavorite = favorite,
-            isEdited = false,
-        )
-    }
-
-    private val MediaImageRow.normalizedOrientation: Int
-        get() = ((orientationDegrees % 360) + 360) % 360
-
-    private fun AssetId.mediaId(): Long {
-        require(value.startsWith(ASSET_ID_PREFIX)) { "Asset ID does not belong to Android MediaStore" }
-        return value.removePrefix(ASSET_ID_PREFIX).toLongOrNull()
-            ?.takeIf { it >= 0 }
-            ?: throw IllegalArgumentException("Android MediaStore asset ID is malformed")
-    }
-
     private companion object {
-        const val ASSET_ID_PREFIX = "android-media:"
         const val ORIGINAL_CHUNK_BYTES = 64 * 1024
         const val MAX_LUMA_EDGE = 512
 
         val readableAccessStates = setOf(AccessState.Full, AccessState.Partial)
-        val defaultQuery = MediaStoreQuery(
-            columns = MediaImageColumn.entries,
-            stillImagesOnly = true,
-            sort = MediaStoreSort.NewestFirstThenId,
-        )
-        val mediaImageOrder = compareByDescending<MediaImageRow> {
-            it.capturedAtMillis ?: Long.MIN_VALUE
-        }.thenBy(MediaImageRow::id)
     }
 }
 
@@ -177,23 +132,28 @@ private class AndroidPhotoPermissionReader(private val context: Context) : Photo
         context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
 }
 
-internal enum class MediaImageColumn {
-    Id,
-    Width,
-    Height,
-    Size,
-    DateTaken,
-    DateModified,
-    Orientation,
-    Favorite,
-}
+internal data class MediaStoreQuerySpec(
+    val projection: List<String>,
+    val selection: String,
+    val selectionArguments: List<String>,
+    val sortOrder: String,
+)
 
-internal enum class MediaStoreSort { NewestFirstThenId }
-
-internal data class MediaStoreQuery(
-    val columns: List<MediaImageColumn>,
-    val stillImagesOnly: Boolean,
-    val sort: MediaStoreSort,
+/** Framework-independent contract passed unchanged to the production ContentResolver query. */
+internal fun androidMediaStoreImageQuery(): MediaStoreQuerySpec = MediaStoreQuerySpec(
+    projection = listOf(
+        COLUMN_ID,
+        COLUMN_WIDTH,
+        COLUMN_HEIGHT,
+        COLUMN_SIZE,
+        COLUMN_DATE_TAKEN,
+        COLUMN_DATE_MODIFIED,
+        COLUMN_ORIENTATION,
+        COLUMN_FAVORITE,
+    ),
+    selection = "$COLUMN_MEDIA_TYPE = ?",
+    selectionArguments = listOf(MEDIA_TYPE_IMAGE.toString()),
+    sortOrder = "$COLUMN_DATE_TAKEN DESC, $COLUMN_ID ASC",
 )
 
 internal data class MediaImageRow(
@@ -206,6 +166,61 @@ internal data class MediaImageRow(
     val orientationDegrees: Int,
     val isFavorite: Boolean?,
 )
+
+internal interface MediaStoreRowValues {
+    fun long(column: String): Long?
+}
+
+/** The exact raw-column mapping used by the production Cursor adapter. */
+internal fun MediaStoreRowValues.toMediaImageRow(): MediaImageRow = MediaImageRow(
+    id = requireNotNull(long(COLUMN_ID)) { "MediaStore row has no ID" },
+    width = requireNotNull(long(COLUMN_WIDTH)) { "MediaStore row has no width" }.toIntExact(COLUMN_WIDTH),
+    height = requireNotNull(long(COLUMN_HEIGHT)) { "MediaStore row has no height" }.toIntExact(COLUMN_HEIGHT),
+    byteCount = long(COLUMN_SIZE),
+    capturedAtMillis = long(COLUMN_DATE_TAKEN),
+    modifiedAtSeconds = long(COLUMN_DATE_MODIFIED),
+    orientationDegrees = (long(COLUMN_ORIENTATION) ?: 0L).toIntExact(COLUMN_ORIENTATION),
+    isFavorite = long(COLUMN_FAVORITE)?.let { it != 0L },
+)
+
+internal fun MediaImageRow.toPhotoDescriptor(): PhotoDescriptor {
+    val normalizedByteCount = byteCount?.takeIf { it >= 0 }
+    val normalizedCapturedAt = capturedAtMillis?.takeIf { it > 0 }
+    val normalizedModifiedAt = modifiedAtSeconds?.takeIf { it > 0 }
+    val normalizedOrientation = ((orientationDegrees % 360) + 360) % 360
+    val favorite = isFavorite == true
+    return PhotoDescriptor(
+        id = id.toAndroidAssetId(),
+        contentSignature = buildString {
+            append("android-v1")
+            append("|w=").append(width)
+            append("|h=").append(height)
+            append("|s=").append(normalizedByteCount ?: "null")
+            append("|taken=").append(normalizedCapturedAt ?: "null")
+            append("|modified=").append(normalizedModifiedAt ?: "null")
+            append("|orientation=").append(normalizedOrientation)
+            append("|favorite=").append(favorite)
+        },
+        width = width,
+        height = height,
+        byteCount = normalizedByteCount,
+        capturedAtEpochMillis = normalizedCapturedAt,
+        isFavorite = favorite,
+        isEdited = false,
+    )
+}
+
+internal fun Long.toAndroidAssetId(): AssetId {
+    require(this >= 0) { "Android MediaStore content ID must not be negative" }
+    return AssetId("$ASSET_ID_PREFIX$this")
+}
+
+internal fun AssetId.toAndroidMediaId(): Long {
+    require(value.startsWith(ASSET_ID_PREFIX)) { "Asset ID does not belong to Android MediaStore" }
+    return value.removePrefix(ASSET_ID_PREFIX).toLongOrNull()
+        ?.takeIf { it >= 0 }
+        ?: throw IllegalArgumentException("Android MediaStore asset ID is malformed")
+}
 
 internal interface ImageCursorFacade : AutoCloseable {
     fun moveToNext(): Boolean
@@ -221,7 +236,7 @@ internal fun interface ObserverRegistration : AutoCloseable {
 }
 
 internal interface ContentResolverFacade {
-    fun queryImages(query: MediaStoreQuery): ImageCursorFacade
+    fun queryImages(query: MediaStoreQuerySpec): ImageCursorFacade
     fun openOriginal(mediaId: Long): ByteSourceFacade
     fun observeImages(onChange: () -> Unit): ObserverRegistration
 }
@@ -233,29 +248,14 @@ internal interface LumaDecoderFacade {
 private class AndroidContentResolverFacade(
     private val contentResolver: ContentResolver,
 ) : ContentResolverFacade {
-    override fun queryImages(query: MediaStoreQuery): ImageCursorFacade {
-        val projection = query.columns.map(MediaImageColumn::platformName).toTypedArray()
-        val selection = if (query.stillImagesOnly) {
-            "${MediaStore.Files.FileColumns.MEDIA_TYPE} = ?"
-        } else {
-            null
-        }
-        val selectionArgs = if (query.stillImagesOnly) {
-            arrayOf(MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE.toString())
-        } else {
-            null
-        }
-        val sortOrder = when (query.sort) {
-            MediaStoreSort.NewestFirstThenId ->
-                "${MediaStore.Images.ImageColumns.DATE_TAKEN} DESC, ${MediaStore.Images.ImageColumns._ID} ASC"
-        }
+    override fun queryImages(query: MediaStoreQuerySpec): ImageCursorFacade {
         val cursor = checkNotNull(
             contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder,
+                query.projection.toTypedArray(),
+                query.selection,
+                query.selectionArguments.toTypedArray(),
+                query.sortOrder,
             ),
         ) { "MediaStore image query returned no cursor" }
         return AndroidImageCursor(cursor)
@@ -284,18 +284,13 @@ private class AndroidContentResolverFacade(
 private class AndroidImageCursor(private val cursor: Cursor) : ImageCursorFacade {
     override fun moveToNext(): Boolean = cursor.moveToNext()
 
-    override fun currentRow(): MediaImageRow = MediaImageRow(
-        id = cursor.requiredLong(MediaStore.Images.ImageColumns._ID),
-        width = cursor.requiredInt(MediaStore.Images.ImageColumns.WIDTH),
-        height = cursor.requiredInt(MediaStore.Images.ImageColumns.HEIGHT),
-        byteCount = cursor.optionalLong(MediaStore.Images.ImageColumns.SIZE),
-        capturedAtMillis = cursor.optionalLong(MediaStore.Images.ImageColumns.DATE_TAKEN),
-        modifiedAtSeconds = cursor.optionalLong(MediaStore.Images.ImageColumns.DATE_MODIFIED),
-        orientationDegrees = cursor.optionalInt(MediaStore.Images.ImageColumns.ORIENTATION) ?: 0,
-        isFavorite = cursor.optionalLong(MediaStore.MediaColumns.IS_FAVORITE)?.let { it != 0L },
-    )
+    override fun currentRow(): MediaImageRow = AndroidCursorRowValues(cursor).toMediaImageRow()
 
     override fun close() = cursor.close()
+}
+
+private class AndroidCursorRowValues(private val cursor: Cursor) : MediaStoreRowValues {
+    override fun long(column: String): Long? = cursor.optionalLong(column)
 }
 
 private class InputStreamByteSource(private val input: InputStream) : ByteSourceFacade {
@@ -303,30 +298,33 @@ private class InputStreamByteSource(private val input: InputStream) : ByteSource
     override fun close() = input.close()
 }
 
-private fun Cursor.requiredLong(column: String): Long = getLong(getColumnIndexOrThrow(column))
-private fun Cursor.requiredInt(column: String): Int = getInt(getColumnIndexOrThrow(column))
-
 private fun Cursor.optionalLong(column: String): Long? {
     val index = getColumnIndex(column)
     return if (index < 0 || isNull(index)) null else getLong(index)
 }
 
-private fun Cursor.optionalInt(column: String): Int? {
-    val index = getColumnIndex(column)
-    return if (index < 0 || isNull(index)) null else getInt(index)
-}
-
-private val MediaImageColumn.platformName: String
-    get() = when (this) {
-        MediaImageColumn.Id -> MediaStore.Images.ImageColumns._ID
-        MediaImageColumn.Width -> MediaStore.Images.ImageColumns.WIDTH
-        MediaImageColumn.Height -> MediaStore.Images.ImageColumns.HEIGHT
-        MediaImageColumn.Size -> MediaStore.Images.ImageColumns.SIZE
-        MediaImageColumn.DateTaken -> MediaStore.Images.ImageColumns.DATE_TAKEN
-        MediaImageColumn.DateModified -> MediaStore.Images.ImageColumns.DATE_MODIFIED
-        MediaImageColumn.Orientation -> MediaStore.Images.ImageColumns.ORIENTATION
-        MediaImageColumn.Favorite -> MediaStore.MediaColumns.IS_FAVORITE
+private fun Long.toIntExact(column: String): Int {
+    require(this in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
+        "MediaStore $column is outside the Int range"
     }
+    return toInt()
+}
 
 internal fun mediaUri(mediaId: Long): Uri =
     Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, mediaId.toString())
+
+private const val ASSET_ID_PREFIX = "android-media:"
+private const val COLUMN_ID = "_id"
+private const val COLUMN_WIDTH = "width"
+private const val COLUMN_HEIGHT = "height"
+private const val COLUMN_SIZE = "_size"
+private const val COLUMN_DATE_TAKEN = "datetaken"
+private const val COLUMN_DATE_MODIFIED = "date_modified"
+private const val COLUMN_ORIENTATION = "orientation"
+private const val COLUMN_FAVORITE = "is_favorite"
+private const val COLUMN_MEDIA_TYPE = "media_type"
+private const val MEDIA_TYPE_IMAGE = 1
+
+private val mediaImageOrder = compareByDescending<MediaImageRow> {
+    it.capturedAtMillis ?: Long.MIN_VALUE
+}.thenBy(MediaImageRow::id)
