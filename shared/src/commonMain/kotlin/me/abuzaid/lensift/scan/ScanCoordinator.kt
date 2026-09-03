@@ -2,7 +2,9 @@ package me.abuzaid.lensift.scan
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -68,6 +70,34 @@ class ScanCoordinator(
     override fun start(policy: AnalysisPolicy) {
         if (!startGate.tryLock()) return
 
+        startLocked(policy)
+    }
+
+    internal suspend fun startAfterQuiescentAndAwait(
+        currentPolicy: () -> AnalysisPolicy,
+        prepare: suspend () -> Unit,
+    ) {
+        startGate.lock()
+        val job = try {
+            currentCoroutineContext().ensureActive()
+            prepare()
+            currentCoroutineContext().ensureActive()
+            startLocked(currentPolicy())
+        } catch (failure: Throwable) {
+            startGate.unlock()
+            throw failure
+        }
+        try {
+            job.join()
+        } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                job.cancelAndJoin()
+            }
+            throw cancelled
+        }
+    }
+
+    private fun startLocked(policy: AnalysisPolicy): Job {
         nextGeneration += 1
         val generation = nextGeneration
         activeGeneration = generation
@@ -89,6 +119,7 @@ class ScanCoordinator(
                 startGate.unlock()
             }
         }
+        return job
     }
 
     override fun pause() {

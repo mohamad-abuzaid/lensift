@@ -17,6 +17,8 @@ interface ScanIndex {
 
     suspend fun purgeExcept(accessibleIds: Set<AssetId>)
 
+    suspend fun invalidate(assetIds: Set<AssetId>)
+
     suspend fun recordCleanup(summary: CleanupSummary)
 
     suspend fun cleanupHistory(): List<CleanupSummary>

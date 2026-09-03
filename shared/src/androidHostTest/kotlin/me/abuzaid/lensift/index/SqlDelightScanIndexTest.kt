@@ -80,6 +80,39 @@ class SqlDelightScanIndexTest {
     }
 
     @Test
+    fun invalidatingChangedAssetsDeletesTheirAnalysisAndWholeReviewGroup() = withIndex { index, database ->
+        index.saveAnalysis(record(id = "unchanged"))
+        index.saveAnalysis(record(id = "changed", signature = "provider-stale-signature"))
+        database.lensiftQueries.insertFindingGroup(
+            group_id = "review-group",
+            kind = "near",
+            policy_key = "balanced-v1",
+            estimated_recoverable_bytes = 10,
+            reviewed = true,
+        )
+        database.lensiftQueries.insertFindingMember(
+            group_id = "review-group",
+            asset_id = "unchanged",
+            position = 0,
+            is_keeper = true,
+            selected_for_removal = false,
+        )
+        database.lensiftQueries.insertFindingMember(
+            group_id = "review-group",
+            asset_id = "changed",
+            position = 1,
+            is_keeper = false,
+            selected_for_removal = true,
+        )
+
+        index.invalidate(setOf(AssetId("changed")))
+
+        assertEquals(listOf("unchanged"), index.currentRecords().map { it.descriptor.id.value })
+        assertEquals(0, database.lensiftQueries.countFindingGroups().executeAsOne())
+        assertEquals(0, database.lensiftQueries.countFindingMembers().executeAsOne())
+    }
+
+    @Test
     fun policySensitivityChangesReuseStoredRawMetricsWithoutReanalysis() = withIndex { index, _ ->
         val saved = record(
             id = "policy-independent",

@@ -22,6 +22,7 @@ class InMemoryScanIndex(initialRecords: List<AnalysisRecord> = emptyList()) : Sc
     val analysisWritesByAsset: MutableMap<AssetId, Int> = linkedMapOf()
     var lastPurgedAccessibleIds: Set<AssetId>? = null
         private set
+    val invalidatedAssetIds: MutableSet<AssetId> = linkedSetOf()
 
     override suspend fun partitionChanged(
         descriptors: List<PhotoDescriptor>,
@@ -67,6 +68,11 @@ class InMemoryScanIndex(initialRecords: List<AnalysisRecord> = emptyList()) : Sc
     override suspend fun purgeExcept(accessibleIds: Set<AssetId>) {
         lastPurgedAccessibleIds = accessibleIds.toSet()
         records.keys.retainAll(accessibleIds)
+    }
+
+    override suspend fun invalidate(assetIds: Set<AssetId>) {
+        invalidatedAssetIds += assetIds
+        records.keys.removeAll(assetIds)
     }
 
     override suspend fun recordCleanup(summary: CleanupSummary) {

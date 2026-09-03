@@ -105,6 +105,18 @@ class SqlDelightScanIndex(driver: SqlDriver) : ScanIndex {
         }
     }
 
+    override suspend fun invalidate(assetIds: Set<AssetId>) {
+        database.transaction {
+            assetIds.asSequence()
+                .map(AssetId::value)
+                .distinct()
+                .forEach { assetId ->
+                    queries.deleteFindingGroupsForAsset(assetId)
+                    queries.deleteAnalysisById(assetId)
+                }
+        }
+    }
+
     override suspend fun recordCleanup(summary: CleanupSummary) {
         database.transaction {
             queries.insertCleanupHistory(

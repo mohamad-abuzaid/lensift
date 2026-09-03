@@ -2,6 +2,7 @@ package me.abuzaid.lensift.test
 
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import me.abuzaid.lensift.domain.AssetId
@@ -16,7 +17,9 @@ class FakePhotoLibraryGateway(
     descriptors: List<PhotoDescriptor> = emptyList(),
 ) : PhotoLibraryGateway {
     var descriptors: List<PhotoDescriptor> = descriptors.toList()
+    var accessBehavior: suspend () -> AccessState = { access }
     var enumerationFailure: Throwable? = null
+    var beforeEnumeration: suspend () -> Unit = {}
     var decodeBehavior: suspend (AssetId) -> LumaFrame = { assetId ->
         val value = assetId.value.hashCode().toByte()
         LumaFrame(1, 1, byteArrayOf(value))
@@ -26,6 +29,8 @@ class FakePhotoLibraryGateway(
     }
 
     var accessCalls: Int = 0
+        private set
+    var enumerationCalls: Int = 0
         private set
     var decodeCalls: Int = 0
         private set
@@ -39,15 +44,20 @@ class FakePhotoLibraryGateway(
         private set
     var maximumActiveOriginalStreams: Int = 0
         private set
+    var observerCount: Int = 0
+        private set
+    val decodedAssetIds = mutableListOf<AssetId>()
 
     private val changes = MutableSharedFlow<LibraryChange>(extraBufferCapacity = 4)
 
     override suspend fun currentAccess(): AccessState {
         accessCalls += 1
-        return access
+        return accessBehavior()
     }
 
     override fun enumerateAccessibleImages(): Flow<PhotoDescriptor> = flow {
+        enumerationCalls += 1
+        beforeEnumeration()
         enumerationFailure?.let { throw it }
         descriptors.forEach { emit(it) }
     }
@@ -55,6 +65,7 @@ class FakePhotoLibraryGateway(
     override suspend fun decodeLuma(assetId: AssetId, targetLongestEdge: Int): LumaFrame {
         check(targetLongestEdge == 512)
         decodeCalls += 1
+        decodedAssetIds += assetId
         activeDecodes += 1
         maximumActiveDecodes = maxOf(maximumActiveDecodes, activeDecodes)
         return try {
@@ -75,7 +86,14 @@ class FakePhotoLibraryGateway(
         }
     }
 
-    override fun observeChanges(): Flow<LibraryChange> = changes
+    override fun observeChanges(): Flow<LibraryChange> = flow {
+        observerCount += 1
+        try {
+            changes.collect { emit(it) }
+        } finally {
+            observerCount -= 1
+        }
+    }
 
     fun emitChange(change: LibraryChange) {
         changes.tryEmit(change)
@@ -86,5 +104,6 @@ class FakePhotoLibraryGateway(
         originalCalls = 0
         maximumActiveDecodes = 0
         maximumActiveOriginalStreams = 0
+        decodedAssetIds.clear()
     }
 }
