@@ -11,6 +11,7 @@ import kotlinx.cinterop.reinterpret
 import kotlinx.cinterop.usePinned
 import kotlinx.cinterop.plus
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -107,17 +108,21 @@ class IosPhotoLibraryGateway internal constructor(
         awaitClose(delivery::cancel)
     }.buffer(capacity = ORIGINAL_STREAM_BUFFER_CAPACITY)
 
-    override fun observeChanges(): Flow<LibraryChange> = callbackFlow {
-        val observation = photoKit.observeImageChanges { changedIdentifiers ->
-            val event = changedIdentifiers
-                ?.sorted()
-                ?.mapTo(linkedSetOf()) { it.toIosAssetId() }
-                ?.takeIf(Set<AssetId>::isNotEmpty)
-                ?.let(LibraryChange::Changed)
-                ?: LibraryChange.AccessMayHaveChanged
-            trySend(event)
+    override fun observeChanges(): Flow<LibraryChange> = flow {
+        val delivery = IosLibraryChangeDelivery()
+        val observation = photoKit.observeImageChanges(delivery::onChange)
+        try {
+            while (true) {
+                val batch = delivery.awaitPendingBatch() ?: break
+                if (batch.assetIds.isNotEmpty()) {
+                    emit(LibraryChange.Changed(batch.assetIds.toCollection(linkedSetOf())))
+                }
+                if (batch.accessMayHaveChanged) emit(LibraryChange.AccessMayHaveChanged)
+            }
+        } finally {
+            delivery.close()
+            observation.close()
         }
-        awaitClose(observation::close)
     }
 
     private companion object {
@@ -125,6 +130,80 @@ class IosPhotoLibraryGateway internal constructor(
         const val ORIGINAL_CHUNK_BYTES = 64 * 1024
         const val ORIGINAL_STREAM_BUFFER_CAPACITY = 64
         val readableAccessStates = setOf(AccessState.Full, AccessState.Partial)
+    }
+}
+
+private data class IosPendingLibraryChange(
+    val assetIds: List<AssetId>,
+    val accessMayHaveChanged: Boolean,
+)
+
+/**
+ * Native callbacks merge into lock-owned state. The only queued value is a conflated one-slot wake;
+ * precise IDs and the coarse access bit therefore survive while downstream delivery is suspended.
+ */
+private class IosLibraryChangeDelivery {
+    private val lock = NSLock()
+    private val wake = Channel<Unit>(capacity = Channel.CONFLATED)
+    private val pendingAssetIds = mutableSetOf<AssetId>()
+    private var pendingAccessChange = false
+    private var terminal = false
+
+    fun onChange(changedIdentifiers: Set<String>?) {
+        val ownedAssetIds = changedIdentifiers
+            ?.toList()
+            ?.sorted()
+            ?.map(String::toIosAssetId)
+            .orEmpty()
+        val shouldWake = withLock {
+            if (terminal) false else {
+                if (ownedAssetIds.isEmpty()) {
+                    pendingAccessChange = true
+                } else {
+                    pendingAssetIds += ownedAssetIds
+                }
+                true
+            }
+        }
+        if (shouldWake && wake.trySend(Unit).isFailure) close()
+    }
+
+    suspend fun awaitPendingBatch(): IosPendingLibraryChange? {
+        while (wake.receiveCatching().isSuccess) {
+            val batch = withLock {
+                if (terminal || (pendingAssetIds.isEmpty() && !pendingAccessChange)) {
+                    null
+                } else {
+                    IosPendingLibraryChange(
+                        assetIds = pendingAssetIds.sortedBy(AssetId::value),
+                        accessMayHaveChanged = pendingAccessChange,
+                    ).also {
+                        pendingAssetIds.clear()
+                        pendingAccessChange = false
+                    }
+                }
+            }
+            if (batch != null) return batch
+        }
+        return null
+    }
+
+    fun close() {
+        withLock {
+            terminal = true
+            pendingAssetIds.clear()
+            pendingAccessChange = false
+        }
+        wake.close()
+    }
+
+    private inline fun <T> withLock(block: () -> T): T {
+        lock.lock()
+        return try {
+            block()
+        } finally {
+            lock.unlock()
+        }
     }
 }
 

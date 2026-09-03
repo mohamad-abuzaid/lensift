@@ -1,11 +1,14 @@
 package me.abuzaid.lensift.platform
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import me.abuzaid.lensift.domain.AssetId
 import me.abuzaid.lensift.domain.LumaFrame
@@ -247,8 +250,44 @@ class AndroidPhotoLibraryGatewayTest {
             changes,
         )
 
+        resolver.notifyDuringUnregister = true
         job.cancelAndJoin()
         assertEquals(1, resolver.unregisterCount)
+    }
+
+    @Test
+    fun `notification storm retains one bounded coarse wake while collection is stalled`() = runTest {
+        val resolver = FakeContentResolver()
+        val changes = mutableListOf<LibraryChange>()
+        val firstDeliveryStarted = CompletableDeferred<Unit>()
+        val releaseFirstDelivery = CompletableDeferred<Unit>()
+        val job = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            gateway(resolver = resolver)
+                .observeChanges()
+                .onEach {
+                    if (firstDeliveryStarted.complete(Unit)) releaseFirstDelivery.await()
+                }
+                .toList(changes)
+        }
+
+        resolver.notifyChange()
+        firstDeliveryStarted.await()
+        repeat(10_000) { resolver.notifyChange() }
+        releaseFirstDelivery.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf<LibraryChange>(
+                LibraryChange.AccessMayHaveChanged,
+                LibraryChange.AccessMayHaveChanged,
+            ),
+            changes,
+        )
+
+        job.cancelAndJoin()
+        repeat(1_000) { resolver.notifyRetiredObserver() }
+        assertEquals(1, resolver.unregisterCount)
+        assertEquals(2, changes.size)
     }
 
     @Test
@@ -388,7 +427,9 @@ private class FakeContentResolver(
     var lastQuery: MediaStoreQuerySpec? = null
     var lastCursor: FakeImageCursor? = null
     var unregisterCount = 0
+    var notifyDuringUnregister = false
     private var observer: (() -> Unit)? = null
+    private var retiredObserver: (() -> Unit)? = null
 
     override fun queryImages(query: MediaStoreQuerySpec): ImageCursorFacade {
         lastQuery = query
@@ -400,12 +441,16 @@ private class FakeContentResolver(
     override fun observeImages(onChange: () -> Unit): ObserverRegistration {
         observer = onChange
         return ObserverRegistration {
+            if (notifyDuringUnregister) observer?.invoke()
+            retiredObserver = observer
             observer = null
             unregisterCount++
         }
     }
 
     fun notifyChange() = observer?.invoke() ?: Unit
+
+    fun notifyRetiredObserver() = retiredObserver?.invoke() ?: Unit
 }
 
 private class MapMediaStoreRowValues(

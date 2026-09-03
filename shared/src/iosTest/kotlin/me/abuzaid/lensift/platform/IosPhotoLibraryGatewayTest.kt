@@ -1,5 +1,6 @@
 package me.abuzaid.lensift.platform
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -8,6 +9,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import me.abuzaid.lensift.domain.AssetId
 import me.abuzaid.lensift.gateway.AccessState
@@ -268,6 +270,54 @@ class IosPhotoLibraryGatewayTest {
     }
 
     @Test
+    fun `stalled change consumer receives the full deterministic union from a notification storm`() = runTest {
+        val facade = FakePhotoKitFacade()
+        val changes = mutableListOf<LibraryChange>()
+        val firstDeliveryStarted = CompletableDeferred<Unit>()
+        val releaseFirstDelivery = CompletableDeferred<Unit>()
+        val job = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            gateway(facade)
+                .observeChanges()
+                .onEach {
+                    if (firstDeliveryStarted.complete(Unit)) releaseFirstDelivery.await()
+                }
+                .toList(changes)
+        }
+
+        facade.emitChange(setOf("seed"))
+        firstDeliveryStarted.await()
+        repeat(10_000) { ordinal ->
+            facade.emitChange(setOf("shared", "asset-${ordinal % 250}"))
+        }
+        facade.emitChange(null)
+        releaseFirstDelivery.complete(Unit)
+        advanceUntilIdle()
+
+        val changedBatches = changes.filterIsInstance<LibraryChange.Changed>()
+        assertEquals(2, changedBatches.size)
+        assertEquals(
+            (listOf(AssetId("ios-photo:seed")) +
+                List(250) { AssetId("ios-photo:asset-$it") } +
+                AssetId("ios-photo:shared")).toSet(),
+            changedBatches.flatMap { it.assetIds }.toSet(),
+        )
+        assertEquals(
+            (List(250) { AssetId("ios-photo:asset-$it") } + AssetId("ios-photo:shared"))
+                .sortedBy(AssetId::value),
+            changedBatches.last().assetIds.toList(),
+        )
+        assertEquals(1, changes.count { it == LibraryChange.AccessMayHaveChanged })
+        assertEquals(3, changes.size)
+
+        facade.notifyDuringObserverClose = true
+        job.cancelAndJoin()
+        repeat(1_000) { facade.emitToRetiredObserver(setOf("after-cancel")) }
+        assertEquals(0, facade.activeObservers)
+        assertEquals(1, facade.closedObservers)
+        assertEquals(3, changes.size)
+    }
+
+    @Test
     fun `each change collector owns exactly one observer until cancellation`() = runTest {
         val facade = FakePhotoKitFacade()
         val adapter = gateway(facade)
@@ -304,7 +354,9 @@ private class FakePhotoKitFacade(
     var cancelledOriginalRequests = 0
     var activeObservers = 0
     var closedObservers = 0
+    var notifyDuringObserverClose = false
     private val observers = mutableListOf<(Set<String>?) -> Unit>()
+    private var retiredObserver: ((Set<String>?) -> Unit)? = null
 
     override fun currentAuthorization(): PhotoKitAuthorizationStatus {
         authorizationReads++
@@ -348,7 +400,9 @@ private class FakePhotoKitFacade(
         observers += onChange
         activeObservers++
         return PhotoKitObservation {
+            if (notifyDuringObserverClose) onChange(setOf("during-close"))
             if (observers.remove(onChange)) {
+                retiredObserver = onChange
                 activeObservers--
                 closedObservers++
             }
@@ -357,6 +411,10 @@ private class FakePhotoKitFacade(
 
     fun emitChange(assetIds: Set<String>?) {
         observers.toList().forEach { it(assetIds) }
+    }
+
+    fun emitToRetiredObserver(assetIds: Set<String>?) {
+        retiredObserver?.invoke(assetIds)
     }
 }
 

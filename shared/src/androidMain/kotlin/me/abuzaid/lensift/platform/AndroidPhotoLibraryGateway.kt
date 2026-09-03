@@ -10,13 +10,12 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.channels.awaitClose
 import me.abuzaid.lensift.domain.AssetId
 import me.abuzaid.lensift.domain.LumaFrame
 import me.abuzaid.lensift.domain.PhotoDescriptor
@@ -84,11 +83,17 @@ class AndroidPhotoLibraryGateway internal constructor(
         }
     }.flowOn(Dispatchers.IO)
 
-    override fun observeChanges(): Flow<LibraryChange> = callbackFlow {
-        val registration = resolver.observeImages {
-            trySend(LibraryChange.AccessMayHaveChanged)
+    override fun observeChanges(): Flow<LibraryChange> = flow {
+        val delivery = AndroidLibraryChangeDelivery()
+        val registration = resolver.observeImages(delivery::onChange)
+        try {
+            while (delivery.awaitPendingChange()) {
+                emit(LibraryChange.AccessMayHaveChanged)
+            }
+        } finally {
+            delivery.close()
+            registration.close()
         }
-        awaitClose(registration::close)
     }
 
     private companion object {
@@ -96,6 +101,45 @@ class AndroidPhotoLibraryGateway internal constructor(
         const val MAX_LUMA_EDGE = 512
 
         val readableAccessStates = setOf(AccessState.Full, AccessState.Partial)
+    }
+}
+
+/** Owns one coarse pending bit and one conflated wake, independent of callbackFlow capacity. */
+private class AndroidLibraryChangeDelivery {
+    private val lock = Any()
+    private val wake = Channel<Unit>(capacity = Channel.CONFLATED)
+    private var pending = false
+    private var terminal = false
+
+    fun onChange() {
+        val shouldWake = synchronized(lock) {
+            if (terminal) false else {
+                pending = true
+                true
+            }
+        }
+        if (shouldWake && wake.trySend(Unit).isFailure) close()
+    }
+
+    suspend fun awaitPendingChange(): Boolean {
+        while (wake.receiveCatching().isSuccess) {
+            val shouldDeliver = synchronized(lock) {
+                if (terminal || !pending) false else {
+                    pending = false
+                    true
+                }
+            }
+            if (shouldDeliver) return true
+        }
+        return false
+    }
+
+    fun close() {
+        synchronized(lock) {
+            terminal = true
+            pending = false
+        }
+        wake.close()
     }
 }
 
