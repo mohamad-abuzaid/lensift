@@ -34,6 +34,7 @@ sealed interface ScanState {
     data class Ready(
         val reviewTotals: ReviewTotals,
         val estimatedRecoverableBytes: Long,
+        val diagnostics: ScanDiagnostics = ScanDiagnostics.Empty,
     ) : ScanState {
         init {
             require(estimatedRecoverableBytes >= 0) { "Estimated recoverable bytes must not be negative" }
@@ -42,11 +43,18 @@ sealed interface ScanState {
         override val isActive: Boolean = false
     }
 
-    data class RecoverableFailure(val progress: ScanProgress) : ScanState {
+    data class RecoverableFailure(
+        val progress: ScanProgress,
+        val reason: ScanFailureReason = ScanFailureReason.Unknown,
+        val diagnostics: ScanDiagnostics = ScanDiagnostics.Empty,
+    ) : ScanState {
         override val isActive: Boolean = false
     }
 
-    data class Cancelled(val progress: ScanProgress) : ScanState {
+    data class Cancelled(
+        val progress: ScanProgress,
+        val diagnostics: ScanDiagnostics = ScanDiagnostics.Empty,
+    ) : ScanState {
         override val isActive: Boolean = false
     }
 }
