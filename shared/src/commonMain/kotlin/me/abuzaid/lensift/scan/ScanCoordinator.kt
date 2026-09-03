@@ -2,6 +2,7 @@ package me.abuzaid.lensift.scan
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
@@ -11,6 +12,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
@@ -54,7 +56,10 @@ class ScanCoordinator(
     private val originalStreamPermits = Semaphore(ORIGINAL_CONCURRENCY)
     private val progressMutex = Mutex()
     private val snapshotMutex = Mutex()
+    private val resumeAuthorizationMutex = Mutex()
     private var currentProgress = ScanProgress(0, 0)
+    private var nextGeneration = 0L
+    private var activeGeneration = NO_GENERATION
 
     init {
         require(analyzerVersion >= 0) { "Analyzer version must not be negative" }
@@ -63,28 +68,44 @@ class ScanCoordinator(
     override fun start(policy: AnalysisPolicy) {
         if (!startGate.tryLock()) return
 
+        nextGeneration += 1
+        val generation = nextGeneration
+        activeGeneration = generation
         control.value = Control.Running
-        currentProgress = ScanProgress(0, 0)
-        _state.value = ScanState.Indexing(currentProgress)
+        _state.value = ScanState.Indexing(ScanProgress(0, 0))
         _findings.value = emptyFindingSnapshot()
         _diagnostics.value = ScanDiagnostics.Empty
 
         val job = scope.launch {
-            runScan(policy)
+            runScan(generation, policy)
         }
-        job.invokeOnCompletion { startGate.unlock() }
+        job.invokeOnCompletion { cause ->
+            if (activeGeneration == generation) {
+                if (cause is CancellationException && _state.value !is ScanState.Cancelled) {
+                    val progress = _state.value.progressOrNull() ?: ScanProgress(0, 0)
+                    _state.value = ScanState.Cancelled(progress, _diagnostics.value)
+                }
+                activeGeneration = NO_GENERATION
+                startGate.unlock()
+            }
+        }
     }
 
     override fun pause() {
         val active = _state.value
-        if (active is ScanState.Active && active !is ScanState.Pausing) {
-            control.value = Control.PauseRequested
-            _state.value = ScanState.Pausing(active.progress)
+        if (
+            active is ScanState.Active &&
+            active !is ScanState.Pausing &&
+            control.compareAndSet(Control.Running, Control.PauseRequested)
+        ) {
+            _state.update { current ->
+                if (current is ScanState.Active) ScanState.Pausing(current.progress) else current
+            }
         }
     }
 
     override fun resume() {
-        if (control.value == Control.PauseRequested) control.value = Control.Running
+        control.compareAndSet(Control.PauseRequested, Control.ResumeRequested)
     }
 
     override fun cancel() {
@@ -93,10 +114,11 @@ class ScanCoordinator(
         }
     }
 
-    private suspend fun runScan(policy: AnalysisPolicy) {
+    private suspend fun runScan(generation: Long, policy: AnalysisPolicy) {
         val skips = mutableListOf<AssetScanSkip>()
         val skipsMutex = Mutex()
         try {
+            setActiveProgress(ScanProgress(0, 0), ::indexingState)
             val access = platformAccess()
             if (!access.canRead) throw HardScanFailure(ScanFailureReason.AccessUnavailable)
 
@@ -109,8 +131,7 @@ class ScanCoordinator(
 
             val records = partition.reusable.toMutableList()
             val recordsMutex = Mutex()
-            currentProgress = ScanProgress(partition.reusable.size, descriptors.size)
-            _state.value = ScanState.Analyzing(currentProgress)
+            setActiveProgress(ScanProgress(partition.reusable.size, descriptors.size), ::analyzingState)
 
             analyzeChanged(
                 partition = partition,
@@ -126,8 +147,7 @@ class ScanCoordinator(
 
             val exactWork = computationCall { assembler.exactHashWork(recordsMutex.withLock { records.toList() }) }
             checkpoint(::analyzingState)
-            currentProgress = ScanProgress(0, exactWork.assetIds.size)
-            _state.value = ScanState.Grouping(currentProgress)
+            setActiveProgress(ScanProgress(0, exactWork.assetIds.size), ::groupingState)
             exactWork.assetIds.forEach { assetId ->
                 checkpoint(::groupingState)
                 hashOriginal(assetId, records, recordsMutex, skips, skipsMutex)
@@ -141,7 +161,8 @@ class ScanCoordinator(
             _findings.value = finalSnapshot
             val diagnostics = diagnostics(skipsMutex, skips)
             _diagnostics.value = diagnostics
-            _state.value = ScanState.Ready(
+            publishReady(
+                generation = generation,
                 reviewTotals = ReviewTotals(
                     exactCount = finalSnapshot.exactGroups.size,
                     nearCount = finalSnapshot.nearGroups.size,
@@ -153,17 +174,22 @@ class ScanCoordinator(
         } catch (cancelled: UserCancelled) {
             val diagnostics = diagnostics(skipsMutex, skips)
             _diagnostics.value = diagnostics
-            _state.value = ScanState.Cancelled(currentProgress, diagnostics)
+            publishCancelled(generation, diagnostics)
         } catch (cancelled: CancellationException) {
+            withContext(NonCancellable) {
+                val diagnostics = diagnostics(skipsMutex, skips)
+                _diagnostics.value = diagnostics
+                publishCancelled(generation, diagnostics)
+            }
             throw cancelled
         } catch (failure: HardScanFailure) {
             val diagnostics = diagnostics(skipsMutex, skips)
             _diagnostics.value = diagnostics
-            _state.value = ScanState.RecoverableFailure(currentProgress, failure.reason, diagnostics)
+            publishFailure(generation, failure.reason, diagnostics)
         } catch (_: Throwable) {
             val diagnostics = diagnostics(skipsMutex, skips)
             _diagnostics.value = diagnostics
-            _state.value = ScanState.RecoverableFailure(currentProgress, ScanFailureReason.Invariant, diagnostics)
+            publishFailure(generation, ScanFailureReason.Invariant, diagnostics)
         }
     }
 
@@ -175,8 +201,7 @@ class ScanCoordinator(
                 checkpoint(::indexingState)
                 if (!ids.add(descriptor.id)) throw HardScanFailure(ScanFailureReason.Invariant)
                 descriptors += descriptor
-                currentProgress = ScanProgress(descriptors.size, descriptors.size)
-                _state.value = ScanState.Indexing(currentProgress)
+                setActiveProgress(ScanProgress(descriptors.size, descriptors.size), ::indexingState)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -265,7 +290,7 @@ class ScanCoordinator(
         val shouldEmit = progressMutex.withLock {
             val completed = (currentProgress.completed + 1).coerceAtMost(currentProgress.total)
             currentProgress = ScanProgress(completed, currentProgress.total)
-            if (control.value == Control.Running) _state.value = ScanState.Analyzing(currentProgress)
+            publishActiveLocked(ScanState.Analyzing(currentProgress))
 
             val cadence = maxOf(
                 MIN_PROGRESSIVE_RECORD_CADENCE,
@@ -324,7 +349,7 @@ class ScanCoordinator(
                 completed = (currentProgress.completed + 1).coerceAtMost(currentProgress.total),
                 total = currentProgress.total,
             )
-            if (control.value == Control.Running) _state.value = ScanState.Grouping(currentProgress)
+            publishActiveLocked(ScanState.Grouping(currentProgress))
         }
     }
 
@@ -348,14 +373,86 @@ class ScanCoordinator(
             when (control.value) {
                 Control.CancelRequested -> throw UserCancelled()
                 Control.PauseRequested -> {
-                    _state.value = ScanState.Paused(currentProgress)
+                    progressMutex.withLock {
+                        if (control.value == Control.PauseRequested) {
+                            _state.update { current ->
+                                if (current.isTerminal) current else ScanState.Paused(currentProgress)
+                            }
+                        }
+                    }
                     control.first { it != Control.PauseRequested }
                     currentCoroutineContext().ensureActive()
                 }
+                Control.ResumeRequested -> reauthorizeResume()
                 Control.Running -> {
-                    _state.value = activeState(currentProgress)
+                    progressMutex.withLock {
+                        publishActiveLocked(activeState(currentProgress))
+                    }
                     if (control.value == Control.Running) return
                 }
+            }
+        }
+    }
+
+    private suspend fun reauthorizeResume() {
+        resumeAuthorizationMutex.withLock {
+            if (control.value != Control.ResumeRequested) return
+            val access = platformAccess()
+            if (!access.canRead) throw HardScanFailure(ScanFailureReason.AccessUnavailable)
+            control.compareAndSet(Control.ResumeRequested, Control.Running)
+        }
+    }
+
+    private suspend fun setActiveProgress(
+        progress: ScanProgress,
+        activeState: (ScanProgress) -> ScanState.Active,
+    ) {
+        progressMutex.withLock {
+            currentProgress = progress
+            publishActiveLocked(activeState(progress))
+        }
+    }
+
+    private fun publishActiveLocked(next: ScanState.Active) {
+        _state.update { current ->
+            when {
+                control.value != Control.Running -> current
+                current is ScanState.Pausing || current is ScanState.Paused || current.isTerminal -> current
+                current.regressesFrom(next) -> current
+                else -> next
+            }
+        }
+    }
+
+    private suspend fun publishReady(
+        generation: Long,
+        reviewTotals: ReviewTotals,
+        estimatedRecoverableBytes: Long,
+        diagnostics: ScanDiagnostics,
+    ) {
+        progressMutex.withLock {
+            if (activeGeneration == generation) {
+                _state.value = ScanState.Ready(reviewTotals, estimatedRecoverableBytes, diagnostics)
+            }
+        }
+    }
+
+    private suspend fun publishCancelled(generation: Long, diagnostics: ScanDiagnostics) {
+        progressMutex.withLock {
+            if (activeGeneration == generation) {
+                _state.value = ScanState.Cancelled(currentProgress, diagnostics)
+            }
+        }
+    }
+
+    private suspend fun publishFailure(
+        generation: Long,
+        reason: ScanFailureReason,
+        diagnostics: ScanDiagnostics,
+    ) {
+        progressMutex.withLock {
+            if (activeGeneration == generation) {
+                _state.value = ScanState.RecoverableFailure(currentProgress, reason, diagnostics)
             }
         }
     }
@@ -406,7 +503,7 @@ class ScanCoordinator(
 
     private fun groupingState(progress: ScanProgress): ScanState.Active = ScanState.Grouping(progress)
 
-    private enum class Control { Running, PauseRequested, CancelRequested }
+    private enum class Control { Running, PauseRequested, ResumeRequested, CancelRequested }
 
     private class UserCancelled : RuntimeException()
 
@@ -420,7 +517,27 @@ class ScanCoordinator(
         const val MIN_PROGRESSIVE_RECORD_CADENCE = 2
         const val MAX_PROGRESSIVE_SNAPSHOTS = 2
         const val MAX_PROGRESSIVE_ASSEMBLY_RECORDS = 1_000
+        const val NO_GENERATION = 0L
     }
+}
+
+private val ScanState.isTerminal: Boolean
+    get() = this is ScanState.Ready || this is ScanState.RecoverableFailure || this is ScanState.Cancelled
+
+private fun ScanState.progressOrNull(): ScanProgress? = when (this) {
+    is ScanState.Active -> progress
+    is ScanState.Paused -> progress
+    is ScanState.RecoverableFailure -> progress
+    is ScanState.Cancelled -> progress
+    ScanState.Idle, is ScanState.Ready -> null
+}
+
+private fun ScanState.regressesFrom(next: ScanState.Active): Boolean = when {
+    this is ScanState.Indexing && next is ScanState.Indexing -> progress.completed > next.progress.completed
+    this is ScanState.Analyzing && next is ScanState.Analyzing -> progress.completed > next.progress.completed
+    this is ScanState.Grouping && next is ScanState.Grouping -> progress.completed > next.progress.completed
+    this is ScanState.Pausing && next is ScanState.Pausing -> progress.completed > next.progress.completed
+    else -> false
 }
 
 private val AccessState.canRead: Boolean

@@ -1,11 +1,16 @@
 package me.abuzaid.lensift.scan
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -135,6 +140,36 @@ class ScanCoordinatorTest {
     }
 
     @Test
+    fun resumeRechecksAccessInsideThePausedRunAndFailsClosedWhenRevoked() = runTest {
+        val decodeStarted = CompletableDeferred<Unit>()
+        val releaseDecode = CompletableDeferred<Unit>()
+        val library = FakePhotoLibraryGateway(descriptors = listOf(descriptor("asset")))
+        library.decodeBehavior = {
+            decodeStarted.complete(Unit)
+            releaseDecode.await()
+            luma(1)
+        }
+        val coordinator = coordinator(library, InMemoryScanIndex())
+
+        coordinator.start(policy())
+        decodeStarted.await()
+        coordinator.pause()
+        releaseDecode.complete(Unit)
+        runCurrent()
+        assertIs<ScanState.Paused>(coordinator.state.value)
+
+        library.access = AccessState.Denied
+        coordinator.resume()
+        advanceUntilIdle()
+
+        assertEquals(2, library.accessCalls)
+        assertEquals(
+            ScanState.RecoverableFailure(ScanProgress(0, 1), ScanFailureReason.AccessUnavailable),
+            coordinator.state.value,
+        )
+    }
+
+    @Test
     fun cancelStopsAfterCurrentAtomicDecodeWithoutCommittingItsResult() = runTest {
         val decodeStarted = CompletableDeferred<Unit>()
         val releaseDecode = CompletableDeferred<Unit>()
@@ -185,6 +220,100 @@ class ScanCoordinatorTest {
         advanceUntilIdle()
         assertEquals(0, library.decodeCalls)
         assertEquals(1, index.analysisWritesByAsset[descriptor.id])
+        assertIs<ScanState.Ready>(coordinator.state.value)
+    }
+
+    @Test
+    fun injectedScopeCancellationPublishesCancelledPreservesCommitAndLeaksNoChild() = runTest {
+        val persistStarted = CompletableDeferred<Unit>()
+        val releasePersist = CompletableDeferred<Unit>()
+        val descriptor = descriptor("asset")
+        val library = FakePhotoLibraryGateway(descriptors = listOf(descriptor))
+        val index = InMemoryScanIndex().apply {
+            afterAnalysisCommitted = {
+                persistStarted.complete(Unit)
+                releasePersist.await()
+            }
+        }
+        val owner = SupervisorJob()
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val coordinator = coordinator(
+            library = library,
+            index = index,
+            scope = CoroutineScope(owner + dispatcher),
+            dispatchers = LensiftDispatchers(dispatcher, dispatcher),
+        )
+
+        coordinator.start(policy())
+        persistStarted.await()
+        owner.cancel()
+        advanceUntilIdle()
+
+        assertIs<ScanState.Cancelled>(coordinator.state.value)
+        assertEquals(1, index.analysisWritesByAsset[descriptor.id])
+        assertTrue(owner.children.none())
+
+        coordinator.start(policy())
+        assertIs<ScanState.Indexing>(coordinator.state.value)
+        advanceUntilIdle()
+        assertIs<ScanState.Cancelled>(coordinator.state.value)
+        assertTrue(owner.children.none())
+        releasePersist.complete(Unit)
+    }
+
+    @Test
+    fun scopeCancelledBeforeStartImmediatelyPublishesCancelledAndLeavesNoChild() = runTest {
+        val owner = SupervisorJob().apply { cancel() }
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val coordinator = coordinator(
+            library = FakePhotoLibraryGateway(descriptors = listOf(descriptor("asset"))),
+            index = InMemoryScanIndex(),
+            scope = CoroutineScope(owner + dispatcher),
+            dispatchers = LensiftDispatchers(dispatcher, dispatcher),
+        )
+
+        coordinator.start(policy())
+        advanceUntilIdle()
+
+        assertEquals(ScanState.Cancelled(ScanProgress(0, 0)), coordinator.state.value)
+        assertTrue(owner.children.none())
+    }
+
+    @Test
+    fun controlledWorkerInterleavingNeverPublishesRegressingAnalyzingProgress() = runTest {
+        val firstPersisted = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val first = descriptor("a")
+        val second = descriptor("b")
+        val index = InMemoryScanIndex().apply {
+            afterAnalysisCommitted = { record ->
+                if (record.descriptor.id == first.id) {
+                    firstPersisted.complete(Unit)
+                    releaseFirst.await()
+                }
+            }
+        }
+        val coordinator = coordinator(
+            FakePhotoLibraryGateway(descriptors = listOf(first, second)),
+            index,
+        )
+        val observed = mutableListOf<Int>()
+        val collector = launch {
+            coordinator.state.collect { state ->
+                if (state is ScanState.Analyzing) observed += state.progress.completed
+            }
+        }
+
+        coordinator.start(policy())
+        firstPersisted.await()
+        runCurrent()
+        releaseFirst.complete(Unit)
+        advanceUntilIdle()
+        collector.cancel()
+
+        assertTrue(observed.isNotEmpty())
+        assertEquals(observed.sorted(), observed)
+        assertEquals(2, observed.last())
         assertIs<ScanState.Ready>(coordinator.state.value)
     }
 
@@ -397,6 +526,8 @@ class ScanCoordinatorTest {
         library: FakePhotoLibraryGateway,
         index: InMemoryScanIndex,
         analyzer: AssetAnalyzer = analyzerFromFirstPixel(),
+        scope: CoroutineScope = this,
+        dispatchers: LensiftDispatchers? = null,
     ): ScanCoordinator {
         val dispatcher = StandardTestDispatcher(testScheduler)
         return ScanCoordinator(
@@ -404,8 +535,8 @@ class ScanCoordinatorTest {
             index = index,
             analyzer = analyzer,
             assembler = FindingAssembler(),
-            scope = this,
-            dispatchers = LensiftDispatchers(computation = dispatcher, database = dispatcher),
+            scope = scope,
+            dispatchers = dispatchers ?: LensiftDispatchers(computation = dispatcher, database = dispatcher),
             analyzerVersion = 1,
         )
     }
