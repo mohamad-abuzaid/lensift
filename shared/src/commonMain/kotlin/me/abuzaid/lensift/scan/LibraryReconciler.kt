@@ -4,11 +4,14 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import me.abuzaid.lensift.domain.AnalysisPolicy
 import me.abuzaid.lensift.domain.AssetId
@@ -25,6 +28,8 @@ class LibraryReconciler(
     private val currentPolicy: () -> AnalysisPolicy,
 ) {
     private var lifecycleJob: Job? = null
+    internal val wakeBufferCapacity: Int
+        get() = WAKE_BUFFER_CAPACITY
 
     fun start() {
         if (lifecycleJob?.isActive == true) return
@@ -37,36 +42,32 @@ class LibraryReconciler(
     }
 
     private suspend fun collectChanges() = coroutineScope {
-        val changes = Channel<LibraryChange>(Channel.UNLIMITED)
+        val pending = PendingState()
+        val wakeSignals = Channel<Unit>(
+            capacity = WAKE_BUFFER_CAPACITY,
+            onBufferOverflow = BufferOverflow.DROP_OLDEST,
+        )
         launch {
             try {
-                library.observeChanges().collect(changes::send)
+                library.observeChanges().collect { change ->
+                    pending.merge(change)
+                    wakeSignals.send(Unit)
+                }
             } finally {
-                changes.close()
+                wakeSignals.close()
             }
         }
 
         while (true) {
-            val first = changes.receiveCatching().getOrNull() ?: break
-            val batch = PendingChange().apply { merge(first) }
-            while (true) {
-                val next = withTimeoutOrNull(DEBOUNCE_MILLIS) {
-                    changes.receiveCatching().getOrNull()
-                } ?: break
-                batch.merge(next)
-            }
+            val firstWake = wakeSignals.receiveCatching()
+            if (firstWake.isClosed) break
+            val batch = pending.awaitDebouncedSnapshot(wakeSignals)
+            if (!batch.hasSignals) continue
 
             coordinator.startAfterQuiescentAndAwait(currentPolicy) {
-                drainQueuedChanges(changes, batch)
+                batch.merge(pending.take())
                 reconcile(batch)
             }
-        }
-    }
-
-    private fun drainQueuedChanges(changes: Channel<LibraryChange>, batch: PendingChange) {
-        while (true) {
-            val change = changes.tryReceive().getOrNull() ?: return
-            batch.merge(change)
         }
     }
 
@@ -101,9 +102,52 @@ class LibraryReconciler(
                 LibraryChange.AccessMayHaveChanged -> accessMayHaveChanged = true
             }
         }
+
+        fun merge(other: PendingChange) {
+            changedAssetIds += other.changedAssetIds
+            accessMayHaveChanged = accessMayHaveChanged || other.accessMayHaveChanged
+        }
+    }
+
+    private class PendingState {
+        private val mutex = Mutex()
+        private var change = PendingChange()
+        private var revision = 0L
+
+        suspend fun merge(next: LibraryChange) {
+            mutex.withLock {
+                change.merge(next)
+                revision += 1
+            }
+        }
+
+        suspend fun take(): PendingChange = mutex.withLock { takeLocked() }
+
+        suspend fun awaitDebouncedSnapshot(wakeSignals: Channel<Unit>): PendingChange {
+            var observedRevision = mutex.withLock { revision }
+            while (true) {
+                val nextWake = withTimeoutOrNull(DEBOUNCE_MILLIS) {
+                    wakeSignals.receiveCatching()
+                }
+                if (nextWake?.isSuccess == true) {
+                    observedRevision = mutex.withLock { revision }
+                    continue
+                }
+                if (nextWake?.isClosed == true) return take()
+
+                val snapshot = mutex.withLock {
+                    if (revision == observedRevision) takeLocked() else null
+                }
+                if (snapshot != null) return snapshot
+                observedRevision = mutex.withLock { revision }
+            }
+        }
+
+        private fun takeLocked(): PendingChange = change.also { change = PendingChange() }
     }
 
     private companion object {
         const val DEBOUNCE_MILLIS = 300L
+        const val WAKE_BUFFER_CAPACITY = 1
     }
 }

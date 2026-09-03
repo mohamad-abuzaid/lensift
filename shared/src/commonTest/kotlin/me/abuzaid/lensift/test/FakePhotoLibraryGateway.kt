@@ -95,9 +95,7 @@ class FakePhotoLibraryGateway(
         }
     }
 
-    fun emitChange(change: LibraryChange) {
-        changes.tryEmit(change)
-    }
+    suspend fun emitChange(change: LibraryChange) = changes.emit(change)
 
     fun clearReadCounts() {
         decodeCalls = 0

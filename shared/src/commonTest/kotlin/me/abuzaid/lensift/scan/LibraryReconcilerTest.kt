@@ -211,6 +211,63 @@ class LibraryReconcilerTest {
     }
 
     @Test
+    fun pausedScanStormUsesOneWakeSlotAndLosslesslyInvalidatesEveryChangedId() = runTest {
+        val stormAssets = List(128) { index ->
+            descriptor("storm-$index").copy(byteCount = index.toLong() + 1)
+        }
+        val blocker = descriptor("blocker").copy(byteCount = 10_000)
+        val decodeStarted = CompletableDeferred<Unit>()
+        val releaseDecode = CompletableDeferred<Unit>()
+        val library = FakePhotoLibraryGateway(descriptors = stormAssets + blocker).apply {
+            decodeBehavior = { assetId ->
+                if (assetId == blocker.id && !decodeStarted.isCompleted) {
+                    decodeStarted.complete(Unit)
+                    releaseDecode.await()
+                }
+                LumaFrame(1, 1, byteArrayOf((assetId.value.hashCode() and 0xff).toByte()))
+            }
+        }
+        val index = InMemoryScanIndex(stormAssets.map(::record))
+        val coordinator = coordinator(library, index)
+        val reconciler = LibraryReconciler(library, index, coordinator, this) { policy() }
+        reconciler.start()
+        runCurrent()
+
+        coordinator.start(policy())
+        decodeStarted.await()
+        coordinator.pause()
+        releaseDecode.complete(Unit)
+        runCurrent()
+        assertIs<ScanState.Paused>(coordinator.state.value)
+
+        repeat(STORM_EVENT_COUNT) { ordinal ->
+            if (ordinal % 17 == 0) {
+                library.emitChange(LibraryChange.AccessMayHaveChanged)
+            } else {
+                library.emitChange(
+                    LibraryChange.Changed(setOf(stormAssets[ordinal % stormAssets.size].id)),
+                )
+            }
+        }
+        advanceTimeBy(300)
+        runCurrent()
+        assertEquals(1, reconciler.wakeBufferCapacity)
+        assertEquals(1, library.accessCalls)
+
+        coordinator.resume()
+        runCurrent()
+        advanceTimeBy(300)
+        runCurrent()
+
+        assertEquals(stormAssets.mapTo(mutableSetOf()) { it.id }, index.invalidatedAssetIds)
+        assertEquals(4, library.accessCalls)
+        assertEquals(3, library.enumerationCalls)
+        assertEquals(stormAssets.size + 1, library.decodeCalls)
+        assertTrue(library.maximumActiveDecodes <= 2)
+        reconciler.stop()
+    }
+
+    @Test
     fun changeDuringPausedScanWaitsUntilResumeAndNeverOverlapsTheScan() = runTest {
         val asset = descriptor("paused")
         val decodeStarted = CompletableDeferred<Unit>()
@@ -478,4 +535,8 @@ class LibraryReconcilerTest {
         maxAspectRatioDelta = 1.0,
         blur = BlurPolicy(laplacianVarianceCeiling = 0.0, edgeDensityCeiling = 0.0),
     )
+
+    private companion object {
+        const val STORM_EVENT_COUNT = 50_000
+    }
 }
