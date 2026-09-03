@@ -1,13 +1,21 @@
 package me.abuzaid.lensift.index
 
 import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
+import app.cash.sqldelight.db.QueryResult
+import app.cash.sqldelight.db.SqlDriver
 import kotlinx.coroutines.runBlocking
+import me.abuzaid.lensift.analysis.BlurAnalyzer
 import me.abuzaid.lensift.analysis.BlurEvidence
 import me.abuzaid.lensift.analysis.BlurVerdict
 import me.abuzaid.lensift.db.LensiftDatabase
+import me.abuzaid.lensift.domain.AnalysisPolicy
 import me.abuzaid.lensift.domain.AssetId
+import me.abuzaid.lensift.domain.BlurPolicy
+import me.abuzaid.lensift.domain.LumaFrame
 import me.abuzaid.lensift.domain.PhotoDescriptor
+import me.abuzaid.lensift.domain.Sensitivity
 import kotlin.test.Test
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
@@ -91,6 +99,51 @@ class SqlDelightScanIndexTest {
     }
 
     @Test
+    fun persistedTextureSupportKeepsWarmReclassificationSafeAcrossPolicyChanges() = withIndex { index, _ ->
+        val initialPolicy = analysisPolicy()
+        val blurred = BlurAnalyzer.analyze(boxBlur(gridFrame(64, 64), radius = 4), initialPolicy)
+        val gradient = BlurAnalyzer.analyze(horizontalGradientFrame(64, 64), initialPolicy)
+        index.saveAnalysis(record(id = "blurred", blurEvidence = blurred))
+        index.saveAnalysis(record(id = "gradient", blurEvidence = gradient))
+
+        val restored = index.currentRecords().associateBy { it.descriptor.id.value }
+        val permissiveCurrentPolicy = analysisPolicy(
+            BlurPolicy(
+                laplacianVarianceCeiling = Double.MAX_VALUE,
+                edgeDensityCeiling = Double.MAX_VALUE,
+            ),
+        )
+
+        assertEquals(blurred.localTextureSupport, restored.getValue("blurred").blurEvidence.localTextureSupport)
+        assertEquals(gradient.localTextureSupport, restored.getValue("gradient").blurEvidence.localTextureSupport)
+        assertEquals(
+            BlurVerdict.PossiblyBlurred,
+            BlurAnalyzer.classify(restored.getValue("blurred").blurEvidence, permissiveCurrentPolicy),
+        )
+        assertEquals(
+            BlurVerdict.Inconclusive,
+            BlurAnalyzer.classify(restored.getValue("gradient").blurEvidence, permissiveCurrentPolicy),
+        )
+    }
+
+    @Test
+    fun schemaIndexesFindingMemberAssetLookups() = withDatabaseDriver { _, _, driver ->
+        val indexNames = driver.executeQuery(
+            identifier = null,
+            sql = "PRAGMA index_list('finding_member')",
+            mapper = { cursor ->
+                val names = mutableListOf<String>()
+                while (cursor.next().value) names += cursor.getString(1)!!
+                QueryResult.Value(names)
+            },
+            parameters = 0,
+            binders = null,
+        ).value
+
+        assertContains(indexNames, "finding_member_asset_id_index")
+    }
+
+    @Test
     fun exactHashIsAttachedOnlyToTheRequestedStoredAsset() = withIndex { index, _ ->
         index.saveAnalysis(record(id = "candidate-a"))
         index.saveAnalysis(record(id = "candidate-b"))
@@ -138,13 +191,18 @@ class SqlDelightScanIndexTest {
         assertEquals(saved, loaded)
     }
 
-    private fun withIndex(block: suspend (SqlDelightScanIndex, LensiftDatabase) -> Unit) = runBlocking {
+    private fun withIndex(block: suspend (SqlDelightScanIndex, LensiftDatabase) -> Unit) =
+        withDatabaseDriver { index, database, _ -> block(index, database) }
+
+    private fun withDatabaseDriver(
+        block: suspend (SqlDelightScanIndex, LensiftDatabase, SqlDriver) -> Unit,
+    ) = runBlocking {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         try {
             LensiftDatabase.Schema.create(driver)
             driver.execute(null, "PRAGMA foreign_keys=ON", 0)
             val database = createLensiftDatabase(driver)
-            block(SqlDelightScanIndex(driver), database)
+            block(SqlDelightScanIndex(driver), database, driver)
         } finally {
             driver.close()
         }
@@ -159,16 +217,19 @@ class SqlDelightScanIndexTest {
         sha256: String? = null,
         laplacianVariance: Double = 0.25,
         edgeDensity: Double = 0.5,
+        localTextureSupport: Double = 0.75,
+        blurEvidence: BlurEvidence = BlurEvidence(
+            laplacianVariance = laplacianVariance,
+            edgeDensity = edgeDensity,
+            localTextureSupport = localTextureSupport,
+            verdict = BlurVerdict.Inconclusive,
+        ),
     ): AnalysisRecord = AnalysisRecord(
         descriptor = descriptor(id, signature, byteCount, capturedAtEpochMillis),
         analyzerVersion = analyzerVersion,
         perceptualHash = 0x1234,
         sha256 = sha256,
-        blurEvidence = BlurEvidence(
-            laplacianVariance = laplacianVariance,
-            edgeDensity = edgeDensity,
-            verdict = BlurVerdict.Inconclusive,
-        ),
+        blurEvidence = blurEvidence,
         analyzedAtEpochMillis = 789,
     )
 
@@ -187,4 +248,49 @@ class SqlDelightScanIndexTest {
         isFavorite = false,
         isEdited = false,
     )
+
+    private fun analysisPolicy(blur: BlurPolicy = BlurPolicy(0.04, 0.20)): AnalysisPolicy = AnalysisPolicy(
+        sensitivity = Sensitivity.Balanced,
+        maxPerceptualDistance = 8,
+        maxCaptureGapMillis = 90_000,
+        maxAspectRatioDelta = 0.02,
+        blur = blur,
+    )
+
+    private fun gridFrame(width: Int, height: Int): LumaFrame = LumaFrame(
+        width,
+        height,
+        ByteArray(width * height) { index ->
+            val x = index % width
+            val y = index / width
+            if ((x / 8 + y / 8) % 2 == 0) 0 else 255.toByte()
+        },
+    )
+
+    private fun horizontalGradientFrame(width: Int, height: Int): LumaFrame = LumaFrame(
+        width,
+        height,
+        ByteArray(width * height) { index -> ((index % width) * 255 / (width - 1)).toByte() },
+    )
+
+    private fun boxBlur(frame: LumaFrame, radius: Int): LumaFrame {
+        val input = frame.pixels
+        val output = ByteArray(input.size)
+        for (y in 0 until frame.height) {
+            for (x in 0 until frame.width) {
+                var sum = 0
+                var count = 0
+                for (offsetY in -radius..radius) {
+                    for (offsetX in -radius..radius) {
+                        val sourceX = (x + offsetX).coerceIn(0, frame.width - 1)
+                        val sourceY = (y + offsetY).coerceIn(0, frame.height - 1)
+                        sum += input[sourceY * frame.width + sourceX].toInt() and 0xff
+                        count += 1
+                    }
+                }
+                output[y * frame.width + x] = (sum / count).toByte()
+            }
+        }
+        return LumaFrame(frame.width, frame.height, output)
+    }
 }

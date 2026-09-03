@@ -166,6 +166,7 @@ class KeeperRecommenderTest {
     private fun evidence(laplacianVariance: Double, edgeDensity: Double): BlurEvidence = BlurEvidence(
         laplacianVariance = laplacianVariance,
         edgeDensity = edgeDensity,
+        localTextureSupport = 1.0,
         verdict = BlurVerdict.Inconclusive,
     )
 }

@@ -55,6 +55,7 @@ class SqlDelightScanIndex(driver: SqlDriver) : ScanIndex {
                 sha256 = record.sha256,
                 laplacian_variance = record.blurEvidence.laplacianVariance,
                 edge_density = record.blurEvidence.edgeDensity,
+                local_texture_support = record.blurEvidence.localTextureSupport,
                 analyzed_at_ms = record.analyzedAtEpochMillis,
             )
             queries.updateAnalysis(
@@ -70,6 +71,7 @@ class SqlDelightScanIndex(driver: SqlDriver) : ScanIndex {
                 sha256 = record.sha256,
                 laplacian_variance = record.blurEvidence.laplacianVariance,
                 edge_density = record.blurEvidence.edgeDensity,
+                local_texture_support = record.blurEvidence.localTextureSupport,
                 analyzed_at_ms = record.analyzedAtEpochMillis,
                 asset_id = record.descriptor.id.value,
             )
@@ -146,6 +148,7 @@ private fun Asset_analysis.toRecord(): AnalysisRecord = AnalysisRecord(
     blurEvidence = BlurEvidence(
         laplacianVariance = laplacian_variance,
         edgeDensity = edge_density,
+        localTextureSupport = local_texture_support,
         verdict = BlurVerdict.Inconclusive,
     ),
     analyzedAtEpochMillis = analyzed_at_ms,

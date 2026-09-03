@@ -21,6 +21,9 @@ data class AnalysisRecord(
         require(blurEvidence.edgeDensity.isFinite() && blurEvidence.edgeDensity >= 0.0) {
             "Edge density must be finite and nonnegative"
         }
+        require(blurEvidence.localTextureSupport.isFinite() && blurEvidence.localTextureSupport in 0.0..1.0) {
+            "Local texture support must be finite and between 0 and 1"
+        }
         require(analyzedAtEpochMillis >= 0) { "Analysis timestamp must not be negative" }
     }
 }

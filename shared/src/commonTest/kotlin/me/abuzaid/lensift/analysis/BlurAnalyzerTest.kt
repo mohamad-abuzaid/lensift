@@ -100,6 +100,25 @@ class BlurAnalyzerTest {
     }
 
     @Test
+    fun rawEvidenceReclassifiesWithCurrentThresholdsWithoutLosingTextureEligibility() {
+        val initialPolicy = balancedPolicy()
+        val blurred = BlurAnalyzer.analyze(boxBlur(gridFrame(64, 64), radius = 4), initialPolicy)
+        val gradient = BlurAnalyzer.analyze(horizontalGradientFrame(64, 64), initialPolicy)
+        val currentPolicy = balancedPolicy(
+            BlurPolicy(
+                laplacianVarianceCeiling = max(blurred.laplacianVariance, gradient.laplacianVariance),
+                edgeDensityCeiling = max(blurred.edgeDensity, gradient.edgeDensity),
+            ),
+        )
+
+        assertTrue(blurred.localTextureSupport > gradient.localTextureSupport)
+        assertEquals(BlurVerdict.PossiblyBlurred, BlurAnalyzer.classify(blurred, currentPolicy))
+        assertEquals(BlurVerdict.Inconclusive, BlurAnalyzer.classify(gradient, currentPolicy))
+        assertEquals(blurred.verdict, BlurAnalyzer.classify(blurred, initialPolicy))
+        assertEquals(gradient.verdict, BlurAnalyzer.classify(gradient, initialPolicy))
+    }
+
+    @Test
     fun framesTooSmallForAThreeByThreeKernelAreInconclusiveWithFiniteScores() {
         listOf(LumaFrame(2, 8, ByteArray(16)), LumaFrame(8, 2, ByteArray(16))).forEach { frame ->
             val evidence = BlurAnalyzer.analyze(frame, balancedPolicy())

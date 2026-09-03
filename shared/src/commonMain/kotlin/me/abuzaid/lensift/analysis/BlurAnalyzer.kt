@@ -7,6 +7,7 @@ import kotlin.math.sqrt
 data class BlurEvidence(
     val laplacianVariance: Double,
     val edgeDensity: Double,
+    val localTextureSupport: Double,
     val verdict: BlurVerdict,
 )
 
@@ -40,19 +41,30 @@ object BlurAnalyzer {
         if (samples.width < 3 || samples.height < 3) return inconclusiveEvidence()
 
         val signals = calculateSignals(samples)
-        val hasEnoughTexture = signals.localTextureSupport >= MIN_LOCAL_TEXTURE_SUPPORT
-        val possiblyBlurred = hasEnoughTexture &&
-            signals.laplacianVariance <= policy.blur.laplacianVarianceCeiling &&
-            signals.edgeDensity <= policy.blur.edgeDensityCeiling
-
-        return BlurEvidence(
+        val rawEvidence = BlurEvidence(
             laplacianVariance = signals.laplacianVariance,
             edgeDensity = signals.edgeDensity,
-            verdict = if (possiblyBlurred) BlurVerdict.PossiblyBlurred else BlurVerdict.Inconclusive,
+            localTextureSupport = signals.localTextureSupport,
+            verdict = BlurVerdict.Inconclusive,
         )
+        return rawEvidence.copy(verdict = classify(rawEvidence, policy))
     }
 
-    private fun inconclusiveEvidence(): BlurEvidence = BlurEvidence(0.0, 0.0, BlurVerdict.Inconclusive)
+    /** Reapplies current policy thresholds to policy-independent, persistable evidence. */
+    fun classify(evidence: BlurEvidence, policy: AnalysisPolicy): BlurVerdict {
+        val hasEnoughTexture = evidence.localTextureSupport >= MIN_LOCAL_TEXTURE_SUPPORT
+        val possiblyBlurred = hasEnoughTexture &&
+            evidence.laplacianVariance <= policy.blur.laplacianVarianceCeiling &&
+            evidence.edgeDensity <= policy.blur.edgeDensityCeiling
+        return if (possiblyBlurred) BlurVerdict.PossiblyBlurred else BlurVerdict.Inconclusive
+    }
+
+    private fun inconclusiveEvidence(): BlurEvidence = BlurEvidence(
+        laplacianVariance = 0.0,
+        edgeDensity = 0.0,
+        localTextureSupport = 0.0,
+        verdict = BlurVerdict.Inconclusive,
+    )
 
     private fun calculateSignals(samples: Samples): Signals {
         var laplacianSum = 0.0

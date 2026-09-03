@@ -12,6 +12,7 @@ CREATE TABLE asset_analysis (
   sha256 TEXT,
   laplacian_variance REAL NOT NULL,
   edge_density REAL NOT NULL,
+  local_texture_support REAL NOT NULL,
   analyzed_at_ms INTEGER NOT NULL
 );
 
@@ -50,6 +51,9 @@ CREATE TABLE finding_member (
   PRIMARY KEY (group_id, asset_id)
 );
 
+CREATE INDEX finding_member_asset_id_index
+ON finding_member(asset_id);
+
 insertAnalysisIfAbsent:
 INSERT OR IGNORE INTO asset_analysis(
   asset_id,
@@ -65,9 +69,10 @@ INSERT OR IGNORE INTO asset_analysis(
   sha256,
   laplacian_variance,
   edge_density,
+  local_texture_support,
   analyzed_at_ms
 )
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 updateAnalysis:
 UPDATE asset_analysis
@@ -83,6 +88,7 @@ SET source_signature = ?,
     sha256 = ?,
     laplacian_variance = ?,
     edge_density = ?,
+    local_texture_support = ?,
     analyzed_at_ms = ?
 WHERE asset_id = ?;
 
