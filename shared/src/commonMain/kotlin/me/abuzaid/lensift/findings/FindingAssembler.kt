@@ -18,9 +18,7 @@ class FindingAssembler {
         val ordered = ownedRecords(records)
         val candidateIds = exactBuckets(ordered)
             .values
-            .flatMap { bucket ->
-                bucket.filter { candidate -> bucket.any { other -> candidate !== other && exactMetadataCompatible(candidate, other) } }
-            }
+            .flatMap(::exactCandidateRecords)
             .asSequence()
             .filter { it.sha256 == null }
             .map { it.descriptor.id }
@@ -82,7 +80,7 @@ class FindingAssembler {
             bucket.filter { it.sha256 != null }
                 .groupBy(AnalysisRecord::sha256)
                 .values
-                .flatMap(::completeByteCompatibleGroups)
+                .flatMap(::partitionExactShaGroup)
         }
         .filter { it.size >= 2 }
         .map { duplicateGroup(DuplicateKind.Exact, it) }
@@ -124,35 +122,30 @@ class FindingAssembler {
         )
     }
 
-    private fun completeByteCompatibleGroups(records: List<AnalysisRecord>): List<List<AnalysisRecord>> {
-        var clusters = records.sortedBy { it.descriptor.id.value }.map(::listOf)
-        while (true) {
-            var merge: Pair<Int, Int>? = null
-            for (leftIndex in 0 until clusters.lastIndex) {
-                for (rightIndex in leftIndex + 1 until clusters.size) {
-                    if (clusters[leftIndex].all { left ->
-                            clusters[rightIndex].all { right -> exactMetadataCompatible(left, right) }
-                        }
-                    ) {
-                        merge = leftIndex to rightIndex
-                        break
-                    }
-                }
-                if (merge != null) break
-            }
-            if (merge == null) return clusters
-
-            val merged = (clusters[merge.first] + clusters[merge.second]).sortedBy { it.descriptor.id.value }
-            clusters = clusters.filterIndexed { index, _ -> index != merge.first && index != merge.second }
-                .plusElement(merged)
-                .sortedBy { it.first().descriptor.id.value }
-        }
+    private fun exactCandidateRecords(bucket: List<AnalysisRecord>): List<AnalysisRecord> {
+        if (bucket.size < 2) return emptyList()
+        if (bucket.any { it.descriptor.byteCount == null }) return bucket
+        return bucket.groupBy { it.descriptor.byteCount!! }
+            .values
+            .filter { it.size >= 2 }
+            .flatten()
     }
 
-    private fun exactMetadataCompatible(left: AnalysisRecord, right: AnalysisRecord): Boolean {
-        val leftBytes = left.descriptor.byteCount
-        val rightBytes = right.descriptor.byteCount
-        return leftBytes == null || rightBytes == null || leftBytes == rightBytes
+    /**
+     * A verified SHA normally implies one byte count. If persisted known sizes contradict that,
+     * each known-size partition remains isolated and unknown-size records form their own fail-safe
+     * partition so they cannot bridge corrupt metadata into one exact group.
+     */
+    private fun partitionExactShaGroup(records: List<AnalysisRecord>): List<List<AnalysisRecord>> {
+        val knownSizeGroups = records.filter { it.descriptor.byteCount != null }
+            .groupBy { it.descriptor.byteCount!! }
+        if (knownSizeGroups.size <= 1) return listOf(records)
+
+        val unknownSizeGroup = records.filter { it.descriptor.byteCount == null }
+        return buildList {
+            addAll(knownSizeGroups.values)
+            if (unknownSizeGroup.isNotEmpty()) add(unknownSizeGroup)
+        }
     }
 
     private fun ownedRecords(records: Iterable<AnalysisRecord>): List<AnalysisRecord> = records.toList()

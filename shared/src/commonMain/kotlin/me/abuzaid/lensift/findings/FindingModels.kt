@@ -52,7 +52,8 @@ class DuplicateGroup(
         require(id.isNotBlank()) { "Finding group ID must not be blank" }
         require(ownedAssetIds.size >= 2) { "Duplicate groups require at least two assets" }
         require(ownedAssetIds == ownedAssetIds.sortedBy(AssetId::value)) { "Duplicate group members must be ordered by asset ID" }
-        require(ownedAssetIds.toSet().size == ownedAssetIds.size) { "Duplicate group members must be distinct" }
+        val assetIdSet = ownedAssetIds.toSet()
+        require(assetIdSet.size == ownedAssetIds.size) { "Duplicate group members must be distinct" }
         require(id == stableFindingId(kind.idPrefix, ownedAssetIds)) { "Finding group ID must be derived from its kind and members" }
         require(keeper in ownedAssetIds) { "The recommended keeper must belong to its duplicate group" }
         require(ownedKeeperReasons.toSet().size == ownedKeeperReasons.size) { "Keeper reasons must be distinct" }
@@ -60,7 +61,7 @@ class DuplicateGroup(
             "Selected assets must be ordered by asset ID"
         }
         require(ownedSelectedForRemoval.toSet().size == ownedSelectedForRemoval.size) { "Selected assets must be distinct" }
-        require(ownedSelectedForRemoval.all(ownedAssetIds::contains)) { "Selected assets must belong to their duplicate group" }
+        require(ownedSelectedForRemoval.all(assetIdSet::contains)) { "Selected assets must belong to their duplicate group" }
         require(keeper !in ownedSelectedForRemoval) { "The recommended keeper must not be selected for removal" }
         require(kind != DuplicateKind.Near || ownedSelectedForRemoval.isEmpty()) {
             "Near-duplicate groups must not preselect removals"

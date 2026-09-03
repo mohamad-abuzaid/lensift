@@ -59,6 +59,65 @@ class FindingAssemblerTest {
     }
 
     @Test
+    fun contradictoryKnownSizesKeepUnknownMembersInTheirOwnFailSafeGroup() {
+        val snapshot = assembler.assemble(
+            listOf(
+                record("a-100", byteCount = 100, hash = 0, sha256 = "same"),
+                record("b-100", byteCount = 100, hash = 0, sha256 = "same"),
+                record("c-200", byteCount = 200, hash = 0, sha256 = "same"),
+                record("d-200", byteCount = 200, hash = 0, sha256 = "same"),
+                record("e-unknown", byteCount = null, hash = 0, sha256 = "same"),
+                record("f-unknown", byteCount = null, hash = 0, sha256 = "same"),
+            ),
+            policy(maxDistance = 0),
+        )
+
+        assertEquals(
+            listOf(
+                listOf(AssetId("a-100"), AssetId("b-100")),
+                listOf(AssetId("c-200"), AssetId("d-200")),
+                listOf(AssetId("e-unknown"), AssetId("f-unknown")),
+            ),
+            snapshot.exactGroups.map { it.assetIds },
+        )
+    }
+
+    @Test
+    fun assemblesTenThousandVerifiedExactMembersAsOneGroup() {
+        val records = List(10_000) { index ->
+            record(
+                id = index.toString().padStart(5, '0'),
+                byteCount = 10,
+                hash = 7,
+                sha256 = "same",
+            )
+        }
+
+        val snapshot = assembler.assemble(records, policy(maxDistance = 0))
+        val group = snapshot.exactGroups.single()
+
+        assertEquals(10_000, group.assetIds.size)
+        assertEquals(AssetId("00000"), group.assetIds.first())
+        assertEquals(AssetId("09999"), group.assetIds.last())
+        assertEquals(9_999, group.selectedForRemoval.size)
+        assertEquals(99_990, snapshot.estimatedRecoverableBytes)
+    }
+
+    @Test
+    fun tenThousandDistinctKnownSizesInOneCollisionBucketProduceNoHashWork() {
+        val records = List(10_000) { index ->
+            record(
+                id = index.toString().padStart(5, '0'),
+                byteCount = index.toLong(),
+                hash = 7,
+                sha256 = null,
+            )
+        }
+
+        assertEquals(emptyList(), assembler.exactHashWork(records).assetIds)
+    }
+
+    @Test
     fun exactAssetsAreExcludedFromNearAndBlurFindings() {
         val snapshot = assembler.assemble(
             listOf(
